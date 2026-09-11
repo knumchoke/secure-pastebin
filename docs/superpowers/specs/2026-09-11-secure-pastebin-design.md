@@ -197,7 +197,7 @@ CREATE TABLE audit_events (
 CREATE INDEX audit_events_at ON audit_events (at);
 ```
 
-Paste **status** is derived, never stored: `deleted` if `deleted_at IS NOT NULL`; else `active` if `now < expires_at`; else `expired`. A row that has been purged by retention simply no longer exists (→ 404).
+Paste **status** is derived, never stored: `deleted` if `deleted_at IS NOT NULL`; else `active` if `now < expires_at`; else `expired`. A fourth value, `unavailable`, is reported when metadata says `active` but the body is missing from Redis (Redis restarted — D3): the user is told the paste was lost, not that it expired. Sweeper does not emit `paste_expired` for these; the API emits `paste_unavailable` once on first observation. A row that has been purged by retention simply no longer exists (→ 404).
 
 ### 5.2 Redis keys
 
@@ -264,7 +264,7 @@ Base path `/api/v1`. JSON request/response, `Content-Type: application/json; cha
 
 `content` in JSON is the **exact canonical text including the leading U+FEFF**. The UI strips the BOM for display and uses the canonical string for download and client-side hashing so the browser-computed SHA-256 equals the server's.
 
-Response codes for unknown/purged id: `404 not_found`. Expired or deleted: `410 expired` / `410 deleted` for content endpoints; `GET /pastes/{id}` still returns 200 with `status:"expired"|"deleted"` and metadata.
+Response codes for unknown/purged id: `404 not_found`. Expired or deleted: `410 expired` / `410 deleted` for content endpoints; `GET /pastes/{id}` still returns 200 with `status:"expired"|"deleted"|"unavailable"` and metadata (`410 unavailable` on content endpoints).
 
 **Request body limit vs. paste size.** JSON escaping inflates content (`\n` → 2 bytes, control chars → 6 bytes), so the HTTP body cap must not equal the paste cap. `POST /pastes` uses `http.MaxBytesReader(6 × PASTE_MAX_SIZE + 64 KiB)`; the authoritative check is on the **decoded canonical bytes**. All other endpoints use a 64 KiB body cap.
 
@@ -332,7 +332,7 @@ Denied requests return `429` with `Retry-After` and emit an audit event.
 | Browser hardening | CSP `default-src 'self'; script-src 'self' 'nonce-…'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy` minimal, `Cache-Control: no-store` on all API and paste pages. | OWASP ASVS V14 |
 | CSRF | SameSite=Strict + header token. | OWASP ASVS V4.2 |
 | Abuse / DoS | Rate limits (§10, fail closed), bounded argon2 concurrency, challenge, body size caps, request timeouts (read 10 s, write 30 s, idle 60 s), container memory limit sized for `ARGON2_MAX_CONCURRENT × 32 MiB` + baseline. | ISO 27001 A.8.6 |
-| Logging & audit | `log/slog` JSON to stdout with `request_id`; `audit_events` table. Events: `login_success`, `login_failure`, `logout`, `oidc_login`, `paste_created`, `paste_viewed`, `paste_unlock_success`, `paste_unlock_failure`, `paste_verify`, `paste_deleted`, `paste_expired` (sweeper), `rate_limited`, `kdf_busy`, `challenge_issued/passed/failed`, `user_created/disabled`. Never log content, passwords, tokens, or key material. | ISO 27001 A.8.15; BoT — audit trail |
+| Logging & audit | `log/slog` JSON to stdout with `request_id`; `audit_events` table. Events: `login_success`, `login_failure`, `logout`, `oidc_login`, `paste_created`, `paste_viewed`, `paste_unlock_success`, `paste_unlock_failure`, `paste_verify`, `paste_deleted`, `paste_expired` (sweeper), `paste_unavailable`, `rate_limited`, `kdf_busy`, `challenge_issued/passed/failed`, `user_created/disabled`. Never log content, passwords, tokens, or key material. | ISO 27001 A.8.15; BoT — audit trail |
 | Data minimisation | Bodies destroyed by TTL or delete; metadata purged after `METADATA_RETENTION_DAYS`; audit rows (contain `ip`, `user_agent` = personal data) purged after `AUDIT_RETENTION_DAYS`; Redis persistence off. | PDPA (TH) §22 data minimisation / retention; ISO 27001 A.8.10 |
 | Revocation | Owner/admin `DELETE /pastes/{id}` destroys the body immediately. | ISO 27001 A.8.10 |
 | Secrets handling | KEK and DB/Redis passwords via Docker/Compose secrets files in production, env vars for local dev only; `.env` git-ignored (repo ships `.gitignore` from day one); `.env.example` has placeholders only. | ISO 27001 A.8.24 |
@@ -347,6 +347,7 @@ Stated residual risks: (1) KEK-wrapped (no-password) pastes are readable by an o
 |----------|---------|-------|
 | `APP_BASE_URL` | — (required) | e.g. `https://pastebin.internal.example` (FQDN in the internal-CA cert SAN); used to build paste URLs and OIDC redirect. |
 | `LISTEN_ADDR` | `:8443` | |
+| `TRUSTED_PROXY_CIDRS` | — | Comma-separated CIDRs. When the TCP peer is inside one, the client IP (for rate limits and audit) is taken from the last `X-Forwarded-For` hop; otherwise `X-Forwarded-For` is ignored. Required when a reverse proxy terminates TLS, else every client shares one IP bucket. |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | — | If unset, serves plain HTTP (only behind a TLS proxy; startup warning). |
 | `DATABASE_URL` | — (required) | `postgres://…` |
 | `REDIS_URL` | — (required) | `redis://:password@redis:6379/0` |
