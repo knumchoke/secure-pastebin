@@ -1,0 +1,21 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - gosec
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - misspell
+    - bodyclose
+    - noctx
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    gosec:
+      excludes:
+        - G404 # math/rand allowed only in challenge tests with seeded source
