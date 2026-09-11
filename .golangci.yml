@@ -19,3 +19,7 @@ linters:
     gosec:
       excludes:
         - G404 # math/rand allowed only in challenge tests with seeded source
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [noctx] # httptest.NewRequest in handler tests is fine
