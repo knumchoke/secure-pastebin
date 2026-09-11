@@ -1,0 +1,24 @@
+# secrets / local config
+.env
+.env.*
+!.env.example
+deploy/secrets/
+*.pem
+*.key
+
+# Go
+bin/
+dist/
+coverage.out
+*.test
+
+# UI
+ui/node_modules/
+ui/dist/
+ui/.vite/
+
+# tooling
+.DS_Store
+.idea/
+.vscode/
+*.log

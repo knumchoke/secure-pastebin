@@ -1,7 +1,10 @@
 # Secure Pastebin — Design Specification
 
 - **Date:** 2026-09-11
-- **Status:** Approved for implementation planning
+- **Status:** Approved for implementation planning (rev 2)
+- **Revision log:**
+  - rev 1 (2026-09-11) — initial design.
+  - rev 2 (2026-09-11) — design review fixes: argon2 concurrency cap (DoS), JSON-inflation body limit, owner/admin early delete, Redis sizing + fail-closed limiter, server-side challenge timing, OIDC group gate required, audit retention (PDPA), `MASTER_KEYS_FILE`, session ID regeneration, BOM/verify canonicalisation in UI, real internal hostname, `is_admin` semantics, hash-oracle caps.
 - **Audience:** Implementation agents (multiple, working in parallel) and reviewers
 - **Deployment target:** Single host inside the company network, Docker Compose
 
@@ -9,7 +12,7 @@
 
 ## 1. Purpose
 
-An internal, ephemeral pastebin. A logged-in user pastes text, optionally protects it with a password, and receives a URL (`https://pastebin.tmp/pastebin/{uuid}`). The paste lives for a short, bounded time (default 300 s, max 900 s), then the body is permanently destroyed. Only an integrity record (SHA-256 + metadata) survives, so anyone holding a copy of the text can later prove it matches what was shared — without the server ever seeing the text again.
+An internal, ephemeral pastebin. A logged-in user pastes text, optionally protects it with a password, and receives a URL (`https://pastebin.internal.example/pastebin/{uuid}` — use a real internal DNS zone under your corporate domain or `.internal`; single-label / invented TLDs such as `.tmp` break browser HSTS, cert validation and search-vs-navigate heuristics). The paste lives for a short, bounded time (default 300 s, max 900 s), then the body is permanently destroyed. Only an integrity record (SHA-256 + metadata) survives, so anyone holding a copy of the text can later prove it matches what was shared — without the server ever seeing the text again.
 
 ## 2. Goals and non-goals
 
@@ -17,7 +20,7 @@ An internal, ephemeral pastebin. A logged-in user pastes text, optionally protec
 1. Ephemeral by construction: paste bodies cannot outlive their TTL (Redis TTL, no Redis persistence).
 2. Confidentiality: bodies are always encrypted at rest; password-protected bodies are unreadable by the server operator.
 3. Integrity: SHA-256 of the canonical bytes is retained and verifiable after expiry.
-4. Immutability: one version only; there is no update path.
+4. Immutability: one version only; there is no update path. (Early **deletion** by the owner or an admin is allowed — revocation is not editing.)
 5. Abuse resistance: authenticated creation, per-user rate limits, optional jigsaw/slider challenge.
 6. Internationalisation: canonical stored/downloaded bytes are UTF-8 **with BOM** (`EF BB BF`).
 7. Configurable via environment variables; runs as one Go binary + Redis + PostgreSQL.
@@ -25,7 +28,6 @@ An internal, ephemeral pastebin. A logged-in user pastes text, optionally protec
 
 ### Non-goals (explicitly out of scope for v1)
 - Editing a paste, versioning, or extending its TTL.
-- Owner-initiated early deletion (may be added later; not in v1).
 - Burn-after-read.
 - File/binary uploads; syntax highlighting; titles/tags; search.
 - Public/self-service registration.
@@ -50,6 +52,12 @@ An internal, ephemeral pastebin. A logged-in user pastes text, optionally protec
 | D12 | Hash algorithm: SHA-256 over canonical bytes; stored as lowercase hex; `hash_algo` column allows future change. | |
 | D13 | Sessions live in Redis (idle 8 h, absolute 12 h). | Central revocation, no JWT-in-cookie footguns. |
 | D14 | Time source: server clock, UTC everywhere, RFC 3339 in API. | Single node. |
+| D15 | **Owner/admin early delete** (`DELETE /pastes/{id}`) is in v1. | The most likely real incident is "I pasted the wrong thing"; a 15-minute exposure window with no undo is unacceptable. Deletion destroys the body and records `deleted_at`; metadata/hash survive. |
+| D16 | **argon2id concurrency is globally bounded** (`ARGON2_MAX_CONCURRENT`, default 4; memory 32 MiB). | Memory-hard KDF on anonymous `unlock` and on `login` is a DoS vector; rate limits alone do not bound concurrent memory. |
+| D17 | **Rate limiter fails closed** when Redis is unavailable or full. | A full/failed Redis must not turn off abuse controls. |
+| D18 | **OIDC requires a group/role claim** (`OIDC_REQUIRED_GROUP` mandatory when OIDC is enabled). | Prevents every IdP account from becoming a pastebin user by default. |
+| D19 | **`is_admin` means:** may delete any paste, and may call `GET /admin/pastes`. User lifecycle stays CLI-only. | A privilege flag with no behaviour is a dormant risk; give it a narrow, explicit meaning. |
+| D20 | **Audit events are purged after `AUDIT_RETENTION_DAYS`** (default 365). | `ip`/`user_agent` are personal data under PDPA; retention must be bounded. Align the default with your BoT log-retention policy. |
 
 ## 4. Architecture
 
@@ -112,6 +120,7 @@ type BodyStore interface {          // Redis
     Delete(ctx, id uuid.UUID) error                 // idempotent
 }
 
+
 type MetaStore interface {          // Postgres
     Create(ctx, m PasteMeta) error
     Get(ctx, id uuid.UUID) (PasteMeta, error)
@@ -128,7 +137,9 @@ type Service interface {
     Create(ctx, p Principal, in CreateInput) (CreateResult, error)
     Read(ctx, p *Principal, id uuid.UUID, password string) (ReadResult, error)   // p nil when anonymous view allowed
     Verify(ctx, id uuid.UUID, sha256hex string) (VerifyResult, error)
+    Delete(ctx, p Principal, id uuid.UUID) error                                 // owner or admin; idempotent
     ListMine(ctx, p Principal, page Page) ([]PasteMeta, error)
+    ListAll(ctx, p Principal, page Page, ownerFilter *uuid.UUID) ([]PasteMeta, error) // admin only
 }
 ```
 
@@ -163,8 +174,10 @@ CREATE TABLE pastes (
   content_hash       text NOT NULL,              -- lowercase hex
   password_protected boolean NOT NULL,
   kek_id             text,                       -- NULL when password-protected
-  view_count         integer NOT NULL DEFAULT 0, -- successful content reads
+  view_count         integer NOT NULL DEFAULT 0, -- successful content reads; incremented atomically (UPDATE … SET view_count = view_count + 1)
   expired_audited_at timestamptz,                -- set by sweeper after emitting paste_expired
+  deleted_at         timestamptz,                -- early delete (owner/admin); body already DEL'd from Redis
+  deleted_by         uuid REFERENCES users(id),
   CONSTRAINT ttl_bounds CHECK (ttl_seconds BETWEEN 1 AND 86400)
 );
 CREATE INDEX pastes_owner_created ON pastes (owner_id, created_at DESC);
@@ -184,7 +197,7 @@ CREATE TABLE audit_events (
 CREATE INDEX audit_events_at ON audit_events (at);
 ```
 
-Paste **status** is derived, never stored: `active` if `now < expires_at`, else `expired`. A row that has been purged by retention simply no longer exists (→ 404).
+Paste **status** is derived, never stored: `deleted` if `deleted_at IS NOT NULL`; else `active` if `now < expires_at`; else `expired`. A row that has been purged by retention simply no longer exists (→ 404).
 
 ### 5.2 Redis keys
 
@@ -195,7 +208,8 @@ Paste **status** is derived, never stored: `active` if `now < expires_at`, else 
 | `chal:{cid}` | hash | 120 s | `{user_id, x, y, issued_at}` — single use (GETDEL) |
 | `ctok:{token}` | string | 120 s | `user_id` — single use (GETDEL) |
 | `rl:{scope}:{key}` | Lua token bucket | per scope | see §10 |
-| `unlock_fail:{uuid}:{ip}` | counter | 15 min | wrong-password attempts |
+| `unlock_fail:{uuid}:{ip}` | counter | 15 min | wrong-password attempts per paste |
+| `unlock_fail:ip:{ip}` | counter | 15 min | wrong-password attempts per IP across all pastes |
 
 All Redis values are opaque to Redis; nothing in Redis is plaintext content.
 
@@ -214,10 +228,11 @@ Library: Go stdlib `crypto/aes`, `crypto/cipher` (GCM), `crypto/rand`, `crypto/s
 - `DEK` = 32 random bytes.
 - `nonce` = 12 random bytes; `ciphertext = AES-256-GCM(DEK, nonce, C, aad = paste_id || expires_at_unix)`. Binding AAD to the id and expiry prevents ciphertext transplant between ids.
 - **KEK mode** (no password): `wrapped_dek = AES-256-GCM(KEK[kek_id], wrap_nonce, DEK, aad = paste_id)`. `MASTER_KEYS="k1:<base64 32B>,k2:<base64 32B>"`; `MASTER_KEY_ACTIVE=k2`. Old keys remain for unwrap until removed; because max lifetime is 15 min, a key can be retired 15 min after it stops being active.
-- **Password mode**: `salt` = 16 random bytes; `PK = argon2id(password, salt, t=3, m=64 MiB, p=2, len=32)`; `wrapped_dek = AES-256-GCM(PK, wrap_nonce, DEK, aad = paste_id)`. No KEK wrap is stored — the server cannot recover the DEK. Wrong password ⇒ GCM tag failure ⇒ `ErrWrongPassword`.
+- **Password mode**: `salt` = 16 random bytes; `PK = argon2id(password, salt, t=3, m=32 MiB, p=2, len=32)` (params stored with the record so they can be raised later); `wrapped_dek = AES-256-GCM(PK, wrap_nonce, DEK, aad = paste_id)`. No KEK wrap is stored — the server cannot recover the DEK. Wrong password ⇒ GCM tag failure ⇒ `ErrWrongPassword`.
 - Password policy: 1–128 chars, any Unicode; no complexity rules (it's short-lived). Passwords are never logged or stored in any form.
 - **Zeroisation**: DEK, PK, and plaintext buffers are overwritten with zeros after use (`crypto.Zero(b)`); best effort in a GC'd language, documented as such.
-- KEK sourcing: env var in v1. Optional later: Vault KV/AppRole loader behind the same `KeyProvider` interface.
+- **KDF concurrency bound**: every argon2id call (login, unlock, `user set-password`) acquires a global semaphore of size `ARGON2_MAX_CONCURRENT` (default 4). Waiting longer than `ARGON2_QUEUE_TIMEOUT` (default 2 s) returns `503 kdf_busy` with `Retry-After`. Worst-case KDF memory is therefore `ARGON2_MAX_CONCURRENT × 32 MiB`, which must fit the container's memory limit.
+- KEK sourcing: `MASTER_KEYS_FILE` (Docker/Compose secret mounted at `/run/secrets/master_keys`, preferred) or `MASTER_KEYS` env var (visible via `docker inspect` / `/proc/<pid>/environ` — dev only). Optional later: Vault KV/AppRole loader behind the same `KeyProvider` interface.
 
 ### 6.3 Where plaintext exists
 Only: (a) in the request body during `Create`, (b) in memory between `Open` and the HTTP response during `Read`. Never in logs, DB, Redis, or URLs.
@@ -228,26 +243,30 @@ Base path `/api/v1`. JSON request/response, `Content-Type: application/json; cha
 
 | Method & path | Auth | Purpose |
 |---------------|------|---------|
-| `GET  /config` | none | Public runtime config for the UI: `auth_modes[]`, `challenge_enabled`, `paste_max_size_bytes`, `ttl_default/min/max`, `view_requires_auth`. |
+| `GET  /config` | none | Public runtime config for the UI: `auth_modes[]`, `challenge_enabled`, `paste_max_size_bytes`, `ttl_default/min/max`, `view_requires_auth`, `notice_text`. |
 | `POST /auth/login` | none | `{username,password}` → sets session cookie; returns `{user}`. Rate-limited. |
 | `POST /auth/logout` | session | Destroys session. |
 | `GET  /auth/oidc/start` | none | Redirect to IdP (state + PKCE in short-lived Redis key). |
 | `GET  /auth/oidc/callback` | none | Exchanges code, provisions user, sets session, redirects to `/new`. |
 | `GET  /auth/me` | session | `{user, csrf_token}`. |
 | `POST /challenges` | session | Issues a jigsaw: `{challenge_id, background_png_b64, piece_png_b64, piece_y, width, height, expires_in}`. |
-| `POST /challenges/{id}/verify` | session | `{x, duration_ms}` → `{challenge_token, expires_in}`; 400 on miss (challenge consumed either way). |
+| `POST /challenges/{id}/verify` | session | `{x}` → `{challenge_token, expires_in}`; 400 on miss (challenge consumed either way). Solve time is measured server-side from the stored `issued_at`. |
 | `POST /pastes` | session (+challenge_token when enabled) | `{content, password?, ttl_seconds?, challenge_token?}` → `201 {id, url, sha256, size_bytes, created_at, expires_at, password_protected}`. |
 | `GET  /pastes/{id}` | session iff `VIEW_REQUIRES_AUTH` | Metadata always (`status, created_at, expires_at, size_bytes, password_protected, sha256*`). `content` included only if active **and** not password-protected. `*sha256` omitted for protected pastes unless unlocked. |
 | `POST /pastes/{id}/unlock` | same as above | `{password}` → `{content, sha256, …}`; with `Accept: text/plain` returns raw canonical bytes (BOM included) as `text/plain; charset=utf-8`, `Content-Disposition: attachment; filename="{id}.txt"`. 401 `wrong_password`, 410 `expired`, 429 after 5 failures/15 min per paste+IP. |
 | `GET  /pastes/{id}/raw` | same as above | Unprotected + active only: raw canonical bytes (curl-friendly). Protected → 401 `password_required`. |
-| `POST /pastes/{id}/verify` | none | `{sha256}` → `{match, status, created_at, expires_at, size_bytes}`. Rate-limited per IP. Works after expiry (until metadata retention purge). |
+| `POST /pastes/{id}/verify` | session iff `VIEW_REQUIRES_AUTH` | `{sha256}` → `{match, status, created_at, expires_at, size_bytes}`. Rate-limited per IP **and** globally. Works after expiry and after delete (until metadata retention purge). |
+| `DELETE /pastes/{id}` | session; owner or admin | Early revocation: `DEL paste:{id}`, set `deleted_at/deleted_by`, audit `paste_deleted`. 204. Idempotent (204 if already deleted/expired). 403 for non-owner non-admin. |
+| `GET  /admin/pastes?limit&offset&owner` | session; admin | Metadata list across owners (no content). |
 | `GET  /me/pastes?limit&offset` | session | Owner's metadata list, newest first. |
 | `GET  /healthz`, `GET /readyz` | none | Liveness; readiness checks Postgres + Redis + KEK loaded. |
 | `GET  /metrics` | none (bind to internal) | Prometheus: pastes_created_total, pastes_active, unlock_failures_total, challenge_pass/fail, http latency. |
 
 `content` in JSON is the **exact canonical text including the leading U+FEFF**. The UI strips the BOM for display and uses the canonical string for download and client-side hashing so the browser-computed SHA-256 equals the server's.
 
-Response codes for unknown/purged id: `404 not_found`. Expired: `410 expired` for content endpoints; `GET /pastes/{id}` still returns 200 with `status:"expired"` and metadata.
+Response codes for unknown/purged id: `404 not_found`. Expired or deleted: `410 expired` / `410 deleted` for content endpoints; `GET /pastes/{id}` still returns 200 with `status:"expired"|"deleted"` and metadata.
+
+**Request body limit vs. paste size.** JSON escaping inflates content (`\n` → 2 bytes, control chars → 6 bytes), so the HTTP body cap must not equal the paste cap. `POST /pastes` uses `http.MaxBytesReader(6 × PASTE_MAX_SIZE + 64 KiB)`; the authoritative check is on the **decoded canonical bytes**. All other endpoints use a 64 KiB body cap.
 
 ## 8. UI (Vite + vanilla TS, embedded)
 
@@ -256,28 +275,28 @@ Routes (client-side router, history API):
 | Route | Description |
 |-------|-------------|
 | `/login` | Local form and/or "Sign in with SSO" button depending on `/config`. |
-| `/new` (default after login) | Textarea; **live counter** `"12.3 KB / 1 MB"` computed as `3 + utf8ByteLength(text)` via `TextEncoder`, debounced 50 ms; turns red and disables **Save** when over `paste_max_size_bytes`; TTL selector (slider or presets 60/300/600/900 s within min/max from config); optional password field with show/hide; if `challenge_enabled`, the jigsaw widget appears on Save and the paste is posted only after a token is obtained. On success: URL with copy button, SHA-256 with copy button, expiry countdown, "protected" badge. |
-| `/pastebin/{uuid}` | Loads `GET /pastes/{id}`. If active & unprotected: shows content (BOM stripped), SHA-256, expiry countdown, **Copy**, **Download .txt** (canonical bytes), **Verify** (hash-in-browser). If protected: password form → `POST /unlock`. If expired: metadata panel + verify form. If 404: not-found page. |
-| `/me` | Table of own pastes: id (link), created, expires/status, size, protected, SHA-256 (copy). |
-| `/verify` | Paste id + either upload/paste text (hashed locally via Web Crypto `crypto.subtle.digest`) or a hex hash → calls `POST /pastes/{id}/verify`. |
+| `/new` (default after login) | Textarea; **live counter** `"12.3 KB / 1 MB"` computed as `3 + utf8ByteLength(text)` via `TextEncoder`, debounced 50 ms; turns red and disables **Save** when over `paste_max_size_bytes`; TTL selector (slider or presets 60/300/600/900 s within min/max from config); optional password field with show/hide (`autocomplete="off"`, so password managers don't offer to save a 5-minute secret); if `challenge_enabled`, the jigsaw widget appears on Save and the paste is posted only after a token is obtained. On success: URL with copy button, SHA-256 with copy button, expiry countdown, "protected" badge, and a **Delete now** button. |
+| `/pastebin/{uuid}` | Loads `GET /pastes/{id}`. If active & unprotected: shows content (BOM stripped), SHA-256, expiry countdown, **Copy** (BOM stripped — note shown: "SHA-256 covers the UTF-8 BOM; verify with the downloaded file or the Verify page"), **Download .txt** (canonical bytes), **Verify** (hash-in-browser), **Delete** (owner/admin only). Deleted: metadata panel with `deleted` badge. If protected: password form → `POST /unlock`. If expired: metadata panel + verify form. If 404: not-found page. |
+| `/me` | Table of own pastes: id (link), created, expires/status, size, protected, SHA-256 (copy), **Delete** action for active pastes. |
+| `/verify` | Paste id + either upload/paste text or a hex hash → calls `POST /pastes/{id}/verify`. Text/file input is **canonicalised exactly as the server does** (prepend `EF BB BF` if absent, no other normalisation) before `crypto.subtle.digest('SHA-256')`, so a copy-pasted body and a downloaded `.txt` both verify. |
 
 UI constraints: no inline scripts/styles (strict CSP with nonce for the one bootstrap tag), no third-party CDN assets (all bundled), no analytics. Thai/English UI strings in a small i18n map (`th`, `en`), default `en`, toggle persisted in `localStorage`.
 
-Jigsaw widget: renders background PNG and piece PNG on a `<canvas>`; a slider drags the piece horizontally; on release posts `{x, duration_ms}`. On failure the widget requests a fresh challenge (max 5 per minute per user; server-enforced).
+Jigsaw widget: renders background PNG and piece PNG on a `<canvas>`; a slider drags the piece horizontally; on release posts `{x}`. On failure the widget requests a fresh challenge (max 5 per minute per user; server-enforced).
 
 ## 9. Human challenge (server-side jigsaw)
 
 - Assets: 8–12 bundled 320×160 PNG backgrounds (`internal/challenge/assets/`, `go:embed`), generated procedurally at build time or provided; no external fetch.
 - Issue: pick background, random piece position `x ∈ [60, W−60]`, `y ∈ [20, H−70]`, piece 50×50 with a classic jigsaw silhouette mask; render background with the piece region darkened (hole) plus subtle noise; render piece PNG (alpha-masked). Store `{user_id, x, y}` in `chal:{cid}` (TTL 120 s). Return both PNGs base64 and `piece_y` (client needs y to place the piece; x is the secret).
-- Verify: `GETDEL chal:{cid}` (single use, must belong to the caller); pass if `|x_submitted − x| ≤ CHALLENGE_TOLERANCE_PX` (default 5) and `duration_ms ≥ 150` (reject instantaneous solves). On pass, mint `ctok:{token}` (32 random bytes base64url, TTL 120 s, single use).
+- Verify: `GETDEL chal:{cid}` (single use, must belong to the caller); pass if `|x_submitted − x| ≤ CHALLENGE_TOLERANCE_PX` (default 5) and `now − issued_at ≥ CHALLENGE_MIN_SOLVE_MS` (default 300 ms, measured **server-side**; the client sends nothing about timing). On pass, mint `ctok:{token}` (32 random bytes base64url, TTL 120 s, single use).
 - `POST /pastes` when `CHALLENGE_ENABLED=true`: `GETDEL ctok:{token}` must succeed and match the session user; otherwise `403 challenge_required`.
-- Config: `CHALLENGE_ENABLED`, `CHALLENGE_TOLERANCE_PX`, `CHALLENGE_TTL_SECONDS`.
+- Config: `CHALLENGE_ENABLED`, `CHALLENGE_TOLERANCE_PX`, `CHALLENGE_TTL_SECONDS`, `CHALLENGE_MIN_SOLVE_MS`.
 
 ## 10. Authentication, sessions, CSRF, rate limits
 
-- **Local**: `argon2id` PHC strings (t=3, m=64 MiB, p=2). Constant-time compare; identical timing/response for unknown user vs wrong password. CLI: `pastebin user create --username u [--admin]` (password prompted, never as an argument), `user disable`, `user list`, `user set-password`.
-- **OIDC**: discovery from `OIDC_ISSUER`; authorization code + PKCE (S256); `state` and `code_verifier` in Redis (TTL 5 min); ID token verified (signature, iss, aud, exp, nonce); user provisioned/updated by `(iss, sub)`; `preferred_username`/`email` used for display. Optional `OIDC_REQUIRED_GROUP` claim gate.
-- **Session cookie**: `pb_sess`, `HttpOnly; Secure; SameSite=Strict; Path=/`, value = 32 random bytes base64url; server-side record in Redis. Idle TTL refreshed on use; absolute cap enforced via stored `abs_exp`.
+- **Local**: `argon2id` PHC strings (t=3, m=`ARGON2_MEMORY_KIB` = 32 MiB, p=2), executed under the same global semaphore as paste unlock (§6.2). Constant-time compare; identical timing/response for unknown user vs wrong password. CLI: `pastebin user create --username u [--admin]` (password prompted, never as an argument), `user disable`, `user list`, `user set-password`.
+- **OIDC**: discovery from `OIDC_ISSUER`; authorization code + PKCE (S256); `state` and `code_verifier` in Redis (TTL 5 min); ID token verified (signature, iss, aud, exp, nonce); user provisioned/updated by `(iss, sub)`; `preferred_username`/`email` used for display. **`OIDC_REQUIRED_GROUP` is mandatory** when OIDC is enabled: the claim named by `OIDC_GROUP_CLAIM` (default `groups`) must contain it, otherwise `403 not_authorised` and no user row is created. Admins are flagged by `OIDC_ADMIN_GROUP` (optional).
+- **Session cookie**: `pb_sess`, `HttpOnly; Secure; SameSite=Strict; Path=/`, value = 32 random bytes base64url; server-side record in Redis. Idle TTL refreshed on use; absolute cap enforced via stored `abs_exp`. **A new session ID is issued on every successful login** (local and OIDC) and any pre-login session is destroyed (session-fixation defence); logout deletes the Redis record. Because the SPA calls the API via same-origin `fetch`, `SameSite=Strict` does not break links opened from chat/email.
 - **CSRF**: SameSite=Strict + per-session random token returned by `/auth/me`, required in `X-CSRF-Token` for all non-GET API calls. OIDC callback is exempt (GET, protected by `state`).
 - **Rate limits** (Redis token bucket, Lua for atomicity; all configurable):
 
@@ -287,8 +306,15 @@ Jigsaw widget: renders background PNG and piece PNG on a `<canvas>`; a slider dr
 | `paste_create` | user id | `RATE_PASTE_PER_MIN=10` |
 | `challenge_issue` | user id | 5/min |
 | `unlock` | paste id + IP | 5 / 15 min, then 429 |
+| `unlock_ip` | IP (all pastes) | `RATE_UNLOCK_IP_PER_15MIN=20` |
 | `verify` | IP | 30/min |
-| global body limit | — | `http.MaxBytesReader(PASTE_MAX_SIZE + 64 KiB)` |
+| `verify_global` | — | `RATE_VERIFY_GLOBAL_PER_MIN=300` (hash-oracle cap) |
+| `delete` | user id | 30/min |
+| KDF concurrency | global semaphore | `ARGON2_MAX_CONCURRENT=4` (see §6.2) |
+| body limit — `POST /pastes` | — | `6 × PASTE_MAX_SIZE + 64 KiB` (see §7) |
+| body limit — all other | — | 64 KiB |
+
+**Fail closed:** if Redis is unreachable, returns an error, or rejects a write (`OOM`), the limiter denies the request (`503 rate_limiter_unavailable`) rather than allowing it.
 
 Denied requests return `429` with `Retry-After` and emit an audit event.
 
@@ -298,51 +324,63 @@ Denied requests return `429` with `Retry-After` and emit an audit event.
 |---------|----------------|---------------------|
 | Transport encryption | TLS 1.2+ (prefer 1.3) served by the app (`TLS_CERT_FILE`/`TLS_KEY_FILE`, internal CA) or a fronting reverse proxy; HSTS `max-age=31536000`. | ISO 27001 A.8.24; BoT IT Risk Mgmt — data-in-transit |
 | Encryption at rest | Envelope AES-256-GCM; KEK from env (Vault-ready); password-wrapped DEK for protected pastes. | ISO 27001 A.8.24; NIST SP 800-38D |
-| Key management | Keyed `MASTER_KEYS` with active-id rotation; no key material in logs/DB. | ISO 27001 A.8.24 |
+| Key management | Keyed KEKs with active-id rotation; loaded from `MASTER_KEYS_FILE` (Compose secret) in production; no key material in logs/DB. | ISO 27001 A.8.24 |
 | Authentication | argon2id local / OIDC+PKCE; no self-registration; account disable. | ISO 27001 A.8.5; OWASP ASVS V2 |
-| Session management | Server-side Redis sessions, idle+absolute expiry, Secure/HttpOnly/SameSite=Strict, logout revocation. | OWASP ASVS V3 |
+| Session management | Server-side Redis sessions, ID regenerated at login, idle+absolute expiry, Secure/HttpOnly/SameSite=Strict, logout revocation. | OWASP ASVS V3 |
 | Input validation | UTF-8 validity, size (`PASTE_MAX_SIZE`), TTL bounds, password length, JSON schema; `MaxBytesReader`. | OWASP ASVS V5 |
 | Injection | pgx parameterised queries only; Redis commands via client API (no string-built commands). | OWASP ASVS V5.3 |
 | Browser hardening | CSP `default-src 'self'; script-src 'self' 'nonce-…'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy` minimal, `Cache-Control: no-store` on all API and paste pages. | OWASP ASVS V14 |
 | CSRF | SameSite=Strict + header token. | OWASP ASVS V4.2 |
-| Abuse / DoS | Rate limits (§10), challenge, body size caps, request timeouts (read 10 s, write 30 s, idle 60 s). | ISO 27001 A.8.6 |
-| Logging & audit | `log/slog` JSON to stdout with `request_id`; `audit_events` table. Events: `login_success`, `login_failure`, `logout`, `oidc_login`, `paste_created`, `paste_viewed`, `paste_unlock_success`, `paste_unlock_failure`, `paste_verify`, `paste_expired` (sweeper), `rate_limited`, `challenge_issued/passed/failed`, `user_created/disabled`. Never log content, passwords, tokens, or key material. | ISO 27001 A.8.15; BoT — audit trail |
-| Data minimisation | Bodies destroyed by TTL; metadata purged after `METADATA_RETENTION_DAYS`; Redis persistence off. | PDPA (TH) data minimisation; ISO 27001 A.8.10 |
-| Secrets handling | All secrets via env / Docker secrets; `.env` git-ignored; `.env.example` has placeholders only. | ISO 27001 A.8.24 |
+| Abuse / DoS | Rate limits (§10, fail closed), bounded argon2 concurrency, challenge, body size caps, request timeouts (read 10 s, write 30 s, idle 60 s), container memory limit sized for `ARGON2_MAX_CONCURRENT × 32 MiB` + baseline. | ISO 27001 A.8.6 |
+| Logging & audit | `log/slog` JSON to stdout with `request_id`; `audit_events` table. Events: `login_success`, `login_failure`, `logout`, `oidc_login`, `paste_created`, `paste_viewed`, `paste_unlock_success`, `paste_unlock_failure`, `paste_verify`, `paste_deleted`, `paste_expired` (sweeper), `rate_limited`, `kdf_busy`, `challenge_issued/passed/failed`, `user_created/disabled`. Never log content, passwords, tokens, or key material. | ISO 27001 A.8.15; BoT — audit trail |
+| Data minimisation | Bodies destroyed by TTL or delete; metadata purged after `METADATA_RETENTION_DAYS`; audit rows (contain `ip`, `user_agent` = personal data) purged after `AUDIT_RETENTION_DAYS`; Redis persistence off. | PDPA (TH) §22 data minimisation / retention; ISO 27001 A.8.10 |
+| Revocation | Owner/admin `DELETE /pastes/{id}` destroys the body immediately. | ISO 27001 A.8.10 |
+| Secrets handling | KEK and DB/Redis passwords via Docker/Compose secrets files in production, env vars for local dev only; `.env` git-ignored (repo ships `.gitignore` from day one); `.env.example` has placeholders only. | ISO 27001 A.8.24 |
 | Container hardening | Distroless/`scratch` image, non-root UID, read-only root FS, `no-new-privileges`, Redis `requirepass`/ACL and `bind` to compose network, Postgres least-privilege role (no superuser). | CIS Docker Benchmark |
 | Dependency hygiene | `go mod verify`, `govulncheck` in CI, `npm audit` for UI, pinned versions. | ISO 27001 A.8.8 |
 
-Stated residual risks: (1) KEK-wrapped (no-password) pastes are readable by an operator holding KEK + Redis access during their lifetime; (2) the jigsaw challenge is bypassable by scripting — rate limits are the real control; (3) Go cannot guarantee zeroisation of all plaintext copies; (4) SHA-256 of short pastes can be brute-forced by guessing content via `/verify` — mitigated by per-IP rate limit and by omitting the hash for protected pastes until unlocked.
+Stated residual risks: (1) KEK-wrapped (no-password) pastes are readable by an operator holding KEK + Redis access during their lifetime; (2) the jigsaw challenge is bypassable by scripting (the hole is visible in the background image) — rate limits are the real control; (3) Go cannot guarantee zeroisation of all plaintext copies; (4) SHA-256 of short pastes can be brute-forced by guessing content via `/verify` — mitigated by per-IP and global rate limits, by requiring login for `/verify` when `VIEW_REQUIRES_AUTH=true`, and by omitting the hash for protected pastes until unlocked; (5) unprotected pastes are readable by anyone who obtains the URL (browser history, chat logs) during their lifetime — by design; `Referrer-Policy: no-referrer` and the API-driven SPA mean link-unfurling bots that do not execute JS never see content; (6) this service will inevitably receive secrets/PII by mistake — the acceptable-use notice on `/new` and the delete path are the mitigations, not a DLP control.
 
 ## 12. Configuration reference (environment variables)
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `APP_BASE_URL` | — (required) | e.g. `https://pastebin.tmp`; used to build paste URLs and OIDC redirect. |
+| `APP_BASE_URL` | — (required) | e.g. `https://pastebin.internal.example` (FQDN in the internal-CA cert SAN); used to build paste URLs and OIDC redirect. |
 | `LISTEN_ADDR` | `:8443` | |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | — | If unset, serves plain HTTP (only behind a TLS proxy; startup warning). |
 | `DATABASE_URL` | — (required) | `postgres://…` |
 | `REDIS_URL` | — (required) | `redis://:password@redis:6379/0` |
-| `MASTER_KEYS` | — (required) | `id:base64(32 bytes)[,id:base64…]` |
+| `MASTER_KEYS_FILE` | — | Path to a secrets file containing the `MASTER_KEYS` format below. Preferred in production. Exactly one of `MASTER_KEYS_FILE` / `MASTER_KEYS` is required. |
+| `MASTER_KEYS` | — | `id:base64(32 bytes)[,id:base64…]`. Dev only (env vars are visible to `docker inspect`). |
 | `MASTER_KEY_ACTIVE` | first id | |
 | `AUTH_MODE` | `local` | `local` \| `oidc` \| `both` |
-| `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_SCOPES` (`openid profile email`), `OIDC_REQUIRED_GROUP` | — | Required when OIDC enabled. |
+| `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` (or `OIDC_CLIENT_SECRET_FILE`), `OIDC_SCOPES` (`openid profile email groups`), `OIDC_REQUIRED_GROUP` | — | All required when OIDC enabled; startup fails if `OIDC_REQUIRED_GROUP` is empty. |
+| `OIDC_GROUP_CLAIM` | `groups` | Claim inspected for `OIDC_REQUIRED_GROUP` / `OIDC_ADMIN_GROUP`. |
+| `OIDC_ADMIN_GROUP` | — | Optional; members get `is_admin=true` on login (and lose it when removed). |
 | `SESSION_IDLE_TTL` | `8h` | Go duration. |
 | `SESSION_ABSOLUTE_TTL` | `12h` | |
 | `VIEW_REQUIRES_AUTH` | `false` | |
 | `CHALLENGE_ENABLED` | `true` | |
 | `CHALLENGE_TOLERANCE_PX` | `5` | |
 | `CHALLENGE_TTL_SECONDS` | `120` | |
+| `CHALLENGE_MIN_SOLVE_MS` | `300` | Server-measured minimum solve time. |
+| `ARGON2_MAX_CONCURRENT` | `4` | Global cap on simultaneous argon2id operations. |
+| `ARGON2_QUEUE_TIMEOUT` | `2s` | Wait before returning `503 kdf_busy`. |
+| `ARGON2_MEMORY_KIB` | `32768` | 32 MiB; raise only with a matching container memory limit. |
 | `PASTE_MAX_SIZE` | `256KB` | Units `B`, `KB`, `MB` (binary: 1 KB = 1024 B). `1024KB` = 1 MiB. Hard cap `16MB`. Applies to canonical bytes incl. BOM. |
 | `PASTE_TTL_DEFAULT` | `300` | seconds |
 | `PASTE_TTL_MIN` | `30` | |
 | `PASTE_TTL_MAX` | `900` | |
 | `PASTE_TTL_HARD_MAX` | `900` | Validation ceiling for `PASTE_TTL_MAX`; raise deliberately. |
 | `METADATA_RETENTION_DAYS` | `180` | `0` = never purge. |
+| `AUDIT_RETENTION_DAYS` | `365` | `0` = never purge. Confirm against BoT log-retention policy and PDPA. |
 | `RATE_PASTE_PER_MIN` | `10` | |
 | `RATE_LOGIN_PER_MIN` | `5` | |
 | `RATE_UNLOCK_PER_15MIN` | `5` | |
-| `RATE_VERIFY_PER_MIN` | `30` | |
+| `RATE_UNLOCK_IP_PER_15MIN` | `20` | Across all pastes. |
+| `RATE_VERIFY_PER_MIN` | `30` | Per IP. |
+| `RATE_VERIFY_GLOBAL_PER_MIN` | `300` | Whole service. |
+| `REDIS_EXPECTED_USERS` | `50` | Used only to compute and log the recommended Redis `maxmemory` (see §13); startup **warns** if the configured Redis `maxmemory` is below it. |
 | `AUDIT_DB_ENABLED` | `true` | stdout JSON is always on. |
 | `LOG_LEVEL` | `info` | |
 | `METRICS_LISTEN_ADDR` | `127.0.0.1:9090` | Empty disables. |
@@ -351,24 +389,26 @@ Size parsing: regex `^(\d+)\s*(B|KB|MB)$` case-insensitive; invalid → startup 
 
 ## 13. Operations
 
-- `deploy/docker-compose.yml`: services `app`, `redis` (custom `redis.conf`: `save ""`, `appendonly no`, `maxmemory 256mb`, `maxmemory-policy noeviction`, `requirepass`), `postgres:16` (named volume). `app` runs `migrate` then `serve`. Healthchecks on all three.
+- `deploy/docker-compose.yml`: services `app` (memory limit ≥ `ARGON2_MAX_CONCURRENT × ARGON2_MEMORY_KIB` + 256 MiB), `redis` (custom `redis.conf`: `save ""`, `appendonly no`, `maxmemory <sized>`, `maxmemory-policy noeviction`, `requirepass` from a secrets file), `postgres:16` (named volume, password from a secrets file). Secrets (`master_keys`, `redis_password`, `postgres_password`, optional `oidc_client_secret`) are Compose `secrets:` mounted at `/run/secrets/*`. `app` runs `migrate` then `serve`. Healthchecks on all three.
+- **Redis sizing.** Redis is a single failure domain shared by bodies, sessions, challenges and rate-limit buckets; when it is full, `noeviction` makes body writes fail (correct) but would also break logins and limiting (fail closed → service unavailable). Size it: `maxmemory ≥ PASTE_MAX_SIZE × RATE_PASTE_PER_MIN × 15 × REDIS_EXPECTED_USERS × 1.2 + 64 MiB`. Example: 1 MiB × 10 × 15 × 50 × 1.2 + 64 MiB ≈ 9.1 GiB is unrealistic — so for large `PASTE_MAX_SIZE` lower `RATE_PASTE_PER_MIN` or accept `503`s under burst; the app logs the recommended value at startup. If isolation is wanted, run a second small `redis-state` instance for sessions/challenges/limits (`REDIS_STATE_URL`, optional; defaults to `REDIS_URL`).
 - First run: `docker compose run --rm app user create --username admin --admin`.
 - Backup: only Postgres (metadata/users). Redis is intentionally not backed up.
-- Sweeper: every 30 s — `DEL` Redis keys for rows whose `expires_at` passed (defensive; Redis TTL already did it), emit `paste_expired` audit once per paste (tracked via the `expired_audited_at timestamptz` column on `pastes`), purge metadata older than retention, update `pastes_active` gauge.
-- Runbook (`docs/runbook.md`): KEK rotation, user lifecycle, incident: "suspected content exposure" → confirm Redis persistence off, rotate KEK, review `audit_events`.
+- Sweeper: every 30 s — `DEL` Redis keys for rows whose `expires_at` passed (defensive; Redis TTL already did it), emit `paste_expired` audit once per paste (tracked via the `expired_audited_at timestamptz` column on `pastes`), purge metadata older than `METADATA_RETENTION_DAYS` and audit rows older than `AUDIT_RETENTION_DAYS` (emitting `audit_purged` with counts only), update `pastes_active` gauge.
+- Runbook (`docs/runbook.md`): KEK rotation, user lifecycle, admin delete, incident: "suspected content exposure" → confirm Redis persistence off, rotate KEK, review `audit_events`; incident: "wrong content pasted" → owner deletes (or admin via `DELETE /pastes/{id}`), record the audit event id.
+- Acceptable-use notice on `/new` (configurable text `NOTICE_TEXT`): remind users not to paste production credentials or customer PII; this service is ephemeral, not a DLP boundary.
 
 ## 14. Testing strategy
 
 | Layer | Tooling | Must-cover |
 |-------|---------|------------|
-| Unit — crypto | `go test` | Seal/Open round-trip (KEK & password); wrong password ⇒ `ErrWrongPassword`; AAD mismatch fails; KEK rotation (open with old id); zeroise called. |
+| Unit — crypto | `go test` | Seal/Open round-trip (KEK & password); wrong password ⇒ `ErrWrongPassword`; AAD mismatch fails; KEK rotation (open with old id); zeroise called; semaphore: N+1 concurrent calls ⇒ one `ErrKDFBusy` after timeout. |
 | Unit — canonicalise | `go test` | BOM added / not duplicated; invalid UTF-8 rejected; size counts BOM; hash matches known vector (`"﻿hello"`). |
 | Unit — config | `go test` | `PASTE_MAX_SIZE` parsing (`1024KB`→1048576, `1mb`, `0`, garbage), TTL bound validation. |
-| Unit — challenge | `go test` | Deterministic with seeded RNG; tolerance edges; single-use; ownership check; min duration. |
-| Unit — ratelimit | `miniredis` | Bucket refill, burst, 429 path. |
-| Integration — stores | `testcontainers-go` (Postgres, Redis) | Body expires (TTL) while metadata persists; `Read` after expiry ⇒ 410 with metadata; retention purge. |
-| Handler | `net/http/httptest` | Every endpoint: auth required, CSRF required, error shapes, security headers present, `Cache-Control: no-store`. |
-| UI unit | `vitest` | Byte counter (`3 + utf8len`), BOM strip/add, client SHA-256 equals server for multi-byte Thai/emoji input. |
+| Unit — challenge | `go test` | Deterministic with seeded RNG; tolerance edges; single-use; ownership check; server-side min solve time (fake clock). |
+| Unit — ratelimit | `miniredis` | Bucket refill, burst, 429 path; Redis down / OOM ⇒ deny (fail closed). |
+| Integration — stores | `testcontainers-go` (Postgres, Redis) | Body expires (TTL) while metadata persists; `Read` after expiry ⇒ 410 with metadata; `Delete` ⇒ body gone immediately, `status:"deleted"`; metadata and audit retention purge. |
+| Handler | `net/http/httptest` | Every endpoint: auth required, CSRF required, error shapes, security headers present, `Cache-Control: no-store`; owner-only/admin-only on `DELETE`; a paste of exactly `PASTE_MAX_SIZE` bytes consisting of newlines/quotes (worst-case JSON inflation) is accepted; `PASTE_MAX_SIZE + 1` is rejected with 413; session ID changes across login. |
+| UI unit | `vitest` | Byte counter (`3 + utf8len`), BOM strip/add, client SHA-256 equals server for multi-byte Thai/emoji input, verify-page canonicalisation yields identical hash for copy-pasted text and downloaded file. |
 | E2E (optional) | Playwright against compose | Login → challenge → create → view → unlock → expire → verify. |
 | Security | `govulncheck`, `gosec`, `npm audit`; manual checklist §11 | Part of CI gate. |
 
@@ -380,9 +420,9 @@ Contracts are frozen by **WS1** before others start: `docs/api/openapi.yaml`, `i
 
 | WS | Name | Scope | Depends on | Definition of done |
 |----|------|-------|------------|--------------------|
-| 1 | Foundation & contracts | Go module, `cmd/pastebin` skeleton (`serve`, `migrate`), `internal/config` (incl. size units), `log/slog` setup, migrations 0001, `ports.go`, `openapi.yaml`, Dockerfile, compose, `.env.example`, Makefile (`make test lint build`), CI (`go vet`, `golangci-lint`, `govulncheck`, `vitest`). | — | `docker compose up` boots app+redis+postgres; `/healthz` 200; contracts reviewed. |
-| 2 | Crypto & paste domain | `internal/crypto`, `internal/paste` (canonicalise, hash, service), `internal/store/postgres` (pastes, audit), `internal/store/redis` (bodies), `internal/sweeper`. | 1 | Unit + integration tests in §14 pass; expiry destroys body, metadata survives. |
-| 3 | Auth, sessions, rate limits | `internal/auth` (local, oidc, session middleware), `internal/ratelimit`, `users` repo, CLI `user …` subcommands. | 1 | Login/logout/OIDC flows tested with a mock IdP; rate limits tested with miniredis. |
+| 1 | Foundation & contracts | `.gitignore`, Go module, `cmd/pastebin` skeleton (`serve`, `migrate`), `internal/config` (incl. size units, secrets-file loading, Redis sizing warning), `log/slog` setup, migrations 0001, `ports.go`, `openapi.yaml`, Dockerfile, compose with `secrets:`, `.env.example`, Makefile (`make test lint build`), CI (`go vet`, `golangci-lint`, `govulncheck`, `vitest`). | — | `docker compose up` boots app+redis+postgres; `/healthz` 200; contracts reviewed. |
+| 2 | Crypto & paste domain | `internal/crypto` (incl. argon2 semaphore, `MASTER_KEYS_FILE` loader), `internal/paste` (canonicalise, hash, service incl. `Delete`), `internal/store/postgres` (pastes, audit), `internal/store/redis` (bodies), `internal/sweeper` (expiry, metadata + audit retention). | 1 | Unit + integration tests in §14 pass; expiry destroys body, metadata survives. |
+| 3 | Auth, sessions, rate limits | `internal/auth` (local, oidc with mandatory group gate, session middleware with ID regeneration), `internal/ratelimit` (fail closed, global + per-key scopes), `users` repo, CLI `user …` subcommands. | 1 | Login/logout/OIDC flows tested with a mock IdP; rate limits tested with miniredis. |
 | 4 | Challenge | `internal/challenge` generator + verifier + assets; handlers for `/challenges*`. | 1 | Deterministic tests; sample PNGs render; token single-use proven. |
 | 5 | HTTP API & middleware | `internal/httpserver`: router, all handlers, security headers, CSRF, body limits, request id, error envelope, `/config`, `/metrics`, static embed. Wires WS2–4 behind interfaces (may stub until they land). | 1 (+2,3,4 for integration) | Handler tests green; OpenAPI conformance check (e.g. `kin-openapi` validator in tests). |
 | 6 | UI | Vite + TS app per §8, jigsaw widget, live byte counter, client hashing, i18n th/en, CSP-compatible build; mock server from `openapi.yaml` for local dev. | 1 (contract only) | `vitest` green; builds into `ui/dist`; manual walkthrough of all routes against WS5. |
@@ -392,13 +432,16 @@ Suggested sequencing: WS1 first (≈ half a day of agent work), then WS2/3/4/6 i
 
 ## 16. Acceptance criteria (product-level)
 
-1. A logged-in user can create a paste, receive `https://…/pastebin/{uuid}`, and see its SHA-256 and expiry.
+1. A logged-in user can create a paste, receive `https://<host>/pastebin/{uuid}`, and see its SHA-256 and expiry.
 2. With `CHALLENGE_ENABLED=true`, creation without a valid challenge token is refused (403); with `false`, the UI never shows the puzzle.
 3. A paste over `PASTE_MAX_SIZE` is refused server-side (413) and the UI counter shows red and disables Save before submission.
 4. Unprotected pastes open by URL alone (when `VIEW_REQUIRES_AUTH=false`); protected pastes require the password; 5 wrong passwords in 15 min ⇒ 429.
 5. After `ttl_seconds`, the body is gone from Redis (verified by test), `GET /pastes/{id}` returns `status:"expired"` with metadata, content endpoints return 410.
 6. `POST /pastes/{id}/verify` with the correct hash returns `match:true` before and after expiry; wrong hash `false`.
 7. Downloaded `.txt` begins with `EF BB BF`, and hashing it locally (`shasum -a 256`) equals the displayed SHA-256, including for Thai and emoji content.
-8. No endpoint exists to modify a paste.
+8. No endpoint exists to modify a paste. The owner (and an admin) can delete it early; afterwards content endpoints return 410 and `GET /pastes/{id}` reports `status:"deleted"`.
 9. Redis container has persistence disabled; `audit_events` records every event in §11 without content/passwords.
-10. Switching `AUTH_MODE=oidc` with a Keycloak realm allows SSO login with no code change.
+10. Switching `AUTH_MODE=oidc` with a Keycloak realm allows SSO login with no code change; an IdP user without `OIDC_REQUIRED_GROUP` is refused.
+11. A paste of exactly `PASTE_MAX_SIZE` canonical bytes made of newlines is accepted despite JSON inflation.
+12. Under `ARGON2_MAX_CONCURRENT + 10` simultaneous wrong-password unlocks the container stays within its memory limit and surplus requests receive `503 kdf_busy`.
+13. Audit rows older than `AUDIT_RETENTION_DAYS` are purged by the sweeper.
