@@ -2,7 +2,6 @@
 .env
 .env.*
 !.env.example
-deploy/secrets/
 *.pem
 *.key
 
@@ -23,3 +22,8 @@ ui/.vite/
 .idea/
 .vscode/
 *.log
+deploy/secrets/*
+!deploy/secrets/README.md
+!deploy/secrets/.gitkeep
+deploy/ca/*
+!deploy/ca/.gitkeep
