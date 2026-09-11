@@ -7,14 +7,15 @@ deploy/secrets/
 *.key
 
 # Go
-bin/
-dist/
+/bin/
+/dist/
 coverage.out
 *.test
 
 # UI
 ui/node_modules/
-ui/dist/
+ui/dist/*
+!ui/dist/.keep
 ui/.vite/
 
 # tooling
