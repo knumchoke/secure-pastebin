@@ -1,0 +1,74 @@
+name: secure-pastebin
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: secure-pastebin:local
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://pastebin:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/pastebin?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set in .env}@redis:6379/0
+      MASTER_KEYS_FILE: /run/secrets/master_keys
+    secrets: [master_keys]
+    ports: ["8443:8443"]
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "/pastebin", "version"]
+      interval: 30s
+    restart: unless-stopped
+
+  migrate:
+    image: secure-pastebin:local
+    depends_on:
+      postgres: { condition: service_healthy }
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://pastebin:${POSTGRES_PASSWORD}@postgres:5432/pastebin?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      MASTER_KEYS_FILE: /run/secrets/master_keys
+    secrets: [master_keys]
+    command: ["migrate"]
+    restart: "no"
+
+  redis:
+    image: redis:7-alpine
+    command: ["sh", "-c", "exec redis-server /usr/local/etc/redis/redis.conf --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pastebin
+      POSTGRES_USER: pastebin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pastebin -d pastebin"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+secrets:
+  master_keys:
+    file: ./secrets/master_keys
+
+volumes:
+  pgdata:

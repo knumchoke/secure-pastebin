@@ -1,0 +1,11 @@
+.git
+bin
+dist
+ui/node_modules
+ui/dist
+deploy/secrets
+deploy/.env
+deploy/.env.*
+tests
+docs
+*.log

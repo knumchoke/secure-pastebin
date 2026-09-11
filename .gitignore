@@ -2,19 +2,19 @@
 .env
 .env.*
 !.env.example
-deploy/secrets/
 *.pem
 *.key
 
 # Go
-bin/
-dist/
+/bin/
+/dist/
 coverage.out
 *.test
 
 # UI
 ui/node_modules/
-ui/dist/
+ui/dist/*
+!ui/dist/.keep
 ui/.vite/
 
 # tooling
@@ -22,3 +22,8 @@ ui/.vite/
 .idea/
 .vscode/
 *.log
+deploy/secrets/*
+!deploy/secrets/README.md
+!deploy/secrets/.gitkeep
+deploy/ca/*
+!deploy/ca/.gitkeep

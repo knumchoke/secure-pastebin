@@ -1,0 +1,284 @@
+openapi: 3.1.0
+info:
+  title: Secure Pastebin API
+  version: 1.0.0
+  description: |
+    Ephemeral, encrypted pastebin. All timestamps are RFC 3339 UTC.
+    `content` fields carry the canonical text INCLUDING the leading U+FEFF BOM.
+    State-changing requests need header `X-CSRF-Token` (from GET /auth/me).
+servers:
+  - url: /api/v1
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: pb_sess
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, description: snake_case machine code }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+    User:
+      type: object
+      required: [id, username, is_admin, provider]
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        display_name: { type: string }
+        is_admin: { type: boolean }
+        provider: { type: string, enum: [local, oidc] }
+    PublicConfig:
+      type: object
+      required: [auth_modes, challenge_enabled, paste_max_size_bytes, ttl_default, ttl_min, ttl_max, view_requires_auth, notice_text]
+      properties:
+        auth_modes: { type: array, items: { type: string, enum: [local, oidc] } }
+        challenge_enabled: { type: boolean }
+        paste_max_size_bytes: { type: integer, format: int64 }
+        ttl_default: { type: integer }
+        ttl_min: { type: integer }
+        ttl_max: { type: integer }
+        view_requires_auth: { type: boolean }
+        notice_text: { type: string }
+    PasteMeta:
+      type: object
+      required: [id, url, status, created_at, expires_at, ttl_seconds, size_bytes, password_protected]
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string, format: uri }
+        status: { type: string, enum: [active, expired, deleted, unavailable] }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        deleted_at: { type: string, format: date-time }
+        ttl_seconds: { type: integer }
+        size_bytes: { type: integer }
+        password_protected: { type: boolean }
+        hash_algo: { type: string, enum: [sha256] }
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$", description: Omitted for password-protected pastes until unlocked. }
+        view_count: { type: integer }
+        owner_id: { type: string, format: uuid, description: Only in /me and /admin listings. }
+    PasteWithContent:
+      allOf:
+        - $ref: "#/components/schemas/PasteMeta"
+        - type: object
+          properties:
+            content: { type: string, description: Canonical text including leading U+FEFF. Present only when readable. }
+    CreatePasteRequest:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string }
+        password: { type: string, minLength: 1, maxLength: 128 }
+        ttl_seconds: { type: integer }
+        challenge_token: { type: string }
+    ChallengeIssued:
+      type: object
+      required: [challenge_id, background_png_b64, piece_png_b64, piece_y, width, height, expires_in]
+      properties:
+        challenge_id: { type: string }
+        background_png_b64: { type: string }
+        piece_png_b64: { type: string }
+        piece_y: { type: integer }
+        width: { type: integer }
+        height: { type: integer }
+        expires_in: { type: integer, description: seconds }
+    VerifyResult:
+      type: object
+      required: [match, status, created_at, expires_at, size_bytes]
+      properties:
+        match: { type: boolean }
+        status: { type: string, enum: [active, expired, deleted, unavailable] }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        size_bytes: { type: integer }
+  responses:
+    Err400: { description: "bad request", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Err401: { description: "unauthenticated / wrong password", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Err403: { description: "forbidden / csrf / challenge_required", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Err404: { description: "not found", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Err410: { description: "expired | deleted | unavailable", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Err413: { description: "paste_too_large (details.limit_bytes, details.actual_bytes)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Err429: { description: "rate_limited (Retry-After header)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Err503: { description: "kdf_busy | rate_limiter_unavailable (Retry-After header)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+paths:
+  /config:
+    get:
+      operationId: getConfig
+      responses:
+        "200": { description: "ok", content: { application/json: { schema: { $ref: "#/components/schemas/PublicConfig" } } } }
+  /auth/login:
+    post:
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        "200": { description: "session cookie set", content: { application/json: { schema: { type: object, required: [user, csrf_token], properties: { user: { $ref: "#/components/schemas/User" }, csrf_token: { type: string } } } } } }
+        "401": { $ref: "#/components/responses/Err401" }
+        "429": { $ref: "#/components/responses/Err429" }
+        "503": { $ref: "#/components/responses/Err503" }
+  /auth/logout:
+    post:
+      operationId: logout
+      security: [{ session: [] }]
+      responses:
+        "204": { description: logged out }
+  /auth/oidc/start:
+    get:
+      operationId: oidcStart
+      responses:
+        "302": { description: redirect to IdP }
+        "404": { description: OIDC disabled }
+  /auth/oidc/callback:
+    get:
+      operationId: oidcCallback
+      parameters:
+        - { name: state, in: query, required: true, schema: { type: string } }
+        - { name: code, in: query, required: true, schema: { type: string } }
+      responses:
+        "302": { description: redirect to /new with session cookie }
+        "400": { $ref: "#/components/responses/Err400" }
+        "403": { $ref: "#/components/responses/Err403" }
+  /auth/me:
+    get:
+      operationId: me
+      security: [{ session: [] }]
+      responses:
+        "200": { description: "ok", content: { application/json: { schema: { type: object, required: [user, csrf_token], properties: { user: { $ref: "#/components/schemas/User" }, csrf_token: { type: string } } } } } }
+        "401": { $ref: "#/components/responses/Err401" }
+  /challenges:
+    post:
+      operationId: issueChallenge
+      security: [{ session: [] }]
+      responses:
+        "201": { description: "issued", content: { application/json: { schema: { $ref: "#/components/schemas/ChallengeIssued" } } } }
+        "404": { description: challenge disabled }
+        "429": { $ref: "#/components/responses/Err429" }
+  /challenges/{id}/verify:
+    post:
+      operationId: verifyChallenge
+      security: [{ session: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [x], properties: { x: { type: integer } } }
+      responses:
+        "200": { description: "passed", content: { application/json: { schema: { type: object, required: [challenge_token, expires_in], properties: { challenge_token: { type: string }, expires_in: { type: integer } } } } } }
+        "400": { description: "challenge_failed (challenge consumed)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "404": { $ref: "#/components/responses/Err404" }
+  /pastes:
+    post:
+      operationId: createPaste
+      security: [{ session: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePasteRequest" }
+      responses:
+        "201": { description: "created", content: { application/json: { schema: { $ref: "#/components/schemas/PasteMeta" } } } }
+        "400": { $ref: "#/components/responses/Err400" }
+        "403": { $ref: "#/components/responses/Err403" }
+        "413": { $ref: "#/components/responses/Err413" }
+        "429": { $ref: "#/components/responses/Err429" }
+        "503": { $ref: "#/components/responses/Err503" }
+  /pastes/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+    get:
+      operationId: getPaste
+      description: Metadata always; content only when active and unprotected. Session required iff view_requires_auth.
+      responses:
+        "200": { description: "ok", content: { application/json: { schema: { $ref: "#/components/schemas/PasteWithContent" } } } }
+        "401": { $ref: "#/components/responses/Err401" }
+        "404": { $ref: "#/components/responses/Err404" }
+    delete:
+      operationId: deletePaste
+      security: [{ session: [] }]
+      responses:
+        "204": { description: deleted (idempotent) }
+        "401": { $ref: "#/components/responses/Err401" }
+        "403": { $ref: "#/components/responses/Err403" }
+        "404": { $ref: "#/components/responses/Err404" }
+        "429": { $ref: "#/components/responses/Err429" }
+  /pastes/{id}/unlock:
+    post:
+      operationId: unlockPaste
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [password], properties: { password: { type: string } } }
+      responses:
+        "200":
+          description: "unlocked. With Accept: text/plain the raw canonical bytes are returned as an attachment."
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/PasteWithContent" } }
+            text/plain: { schema: { type: string } }
+        "401": { $ref: "#/components/responses/Err401" }
+        "404": { $ref: "#/components/responses/Err404" }
+        "410": { $ref: "#/components/responses/Err410" }
+        "429": { $ref: "#/components/responses/Err429" }
+        "503": { $ref: "#/components/responses/Err503" }
+  /pastes/{id}/raw:
+    get:
+      operationId: rawPaste
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: "canonical bytes (BOM included) as text/plain attachment", content: { text/plain: { schema: { type: string } } } }
+        "401": { description: "password_required or unauthenticated", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "404": { $ref: "#/components/responses/Err404" }
+        "410": { $ref: "#/components/responses/Err410" }
+  /pastes/{id}/verify:
+    post:
+      operationId: verifyPaste
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [sha256], properties: { sha256: { type: string, pattern: "^[0-9a-fA-F]{64}$" } } }
+      responses:
+        "200": { description: "ok", content: { application/json: { schema: { $ref: "#/components/schemas/VerifyResult" } } } }
+        "400": { $ref: "#/components/responses/Err400" }
+        "401": { $ref: "#/components/responses/Err401" }
+        "404": { $ref: "#/components/responses/Err404" }
+        "429": { $ref: "#/components/responses/Err429" }
+  /me/pastes:
+    get:
+      operationId: listMyPastes
+      security: [{ session: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200": { description: "ok", content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: "#/components/schemas/PasteMeta" } } } } } } }
+        "401": { $ref: "#/components/responses/Err401" }
+  /admin/pastes:
+    get:
+      operationId: adminListPastes
+      security: [{ session: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+        - { name: owner, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "ok", content: { application/json: { schema: { type: object, required: [items], properties: { items: { type: array, items: { $ref: "#/components/schemas/PasteMeta" } } } } } } }
+        "401": { $ref: "#/components/responses/Err401" }
+        "403": { $ref: "#/components/responses/Err403" }
