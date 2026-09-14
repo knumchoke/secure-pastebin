@@ -16,6 +16,7 @@ type fakeBodies struct {
 	marked                             map[uuid.UUID]bool
 	putErr, getErr, deleteErr, markErr error
 	deleteCtxErr                       error
+	onGet                              func()
 }
 
 func newFakeBodies() *fakeBodies {
@@ -34,6 +35,9 @@ func (f *fakeBodies) Put(_ context.Context, id uuid.UUID, rec EncryptedBody, ttl
 func (f *fakeBodies) Get(_ context.Context, id uuid.UUID) (EncryptedBody, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.onGet != nil {
+		f.onGet()
+	}
 	if f.getErr != nil {
 		return EncryptedBody{}, f.getErr
 	}
@@ -75,6 +79,7 @@ type fakeMetas struct {
 	items                                          map[uuid.UUID]PasteMeta
 	createErr, getErr, viewErr, deleteErr, listErr error
 	onCreate                                       func()
+	onView                                         func()
 }
 
 func newFakeMetas() *fakeMetas { return &fakeMetas{items: map[uuid.UUID]PasteMeta{}} }
@@ -111,6 +116,9 @@ func (f *fakeMetas) IncrementViews(_ context.Context, id uuid.UUID) error {
 	m := f.items[id]
 	m.ViewCount++
 	f.items[id] = m
+	if f.onView != nil {
+		f.onView()
+	}
 	return nil
 }
 func (f *fakeMetas) MarkDeleted(_ context.Context, id, by uuid.UUID, at time.Time) error {
@@ -242,14 +250,18 @@ func (f *fakeEnvelope) Open(_ context.Context, _ uuid.UUID, _ time.Time, rec Enc
 func (*fakeEnvelope) ActiveKEKID() string { return "k1" }
 
 type fakeAudit struct {
-	mu     sync.Mutex
-	events []audit.Event
+	mu       sync.Mutex
+	events   []audit.Event
+	onRecord func()
 }
 
 func (f *fakeAudit) Record(_ context.Context, e audit.Event) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.events = append(f.events, e)
+	if f.onRecord != nil {
+		f.onRecord()
+	}
 }
 func (f *fakeAudit) count(name string) int {
 	f.mu.Lock()

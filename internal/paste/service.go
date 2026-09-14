@@ -127,6 +127,13 @@ func (s *service) Read(ctx context.Context, p *Principal, id uuid.UUID, password
 		return res, nil
 	}
 	rec, err := s.d.Bodies.Get(ctx, id)
+	// Body lookup may block until the key's TTL expires. That is expiry, not
+	// an unavailable body, even when Get returns ErrNotFound.
+	now = s.d.Now()
+	if !now.Before(m.ExpiresAt) {
+		res.Status = StatusExpired
+		return res, nil
+	}
 	if errors.Is(err, ErrNotFound) {
 		res.Status = StatusUnavailable
 		if first, markErr := s.d.Bodies.MarkUnavailableOnce(ctx, id, m.ExpiresAt.Sub(now)+time.Hour); markErr == nil && first {
@@ -154,13 +161,25 @@ func (s *service) Read(ctx context.Context, p *Principal, id uuid.UUID, password
 		return res, nil
 	}
 	_ = s.d.Metas.IncrementViews(ctx, id) // a view remains successful if this counter fails
-	res.Content = plain                   // caller owns and must clear returned plaintext
-	res.HashVisible = true
+	if !s.d.Now().Before(m.ExpiresAt) {
+		zeroBytes(plain)
+		res.Status = StatusExpired
+		return res, nil
+	}
 	if m.PasswordProtected {
 		s.record(ctx, audit.PasteUnlockSuccess, actorOf(p), &id, audit.OutcomeSuccess, nil)
 	} else {
 		s.record(ctx, audit.PasteViewed, actorOf(p), &id, audit.OutcomeSuccess, nil)
 	}
+	// A sink can also block. Its successful-decryption event may have been
+	// recorded, but plaintext must never be released after expiry.
+	if !s.d.Now().Before(m.ExpiresAt) {
+		zeroBytes(plain)
+		res.Status = StatusExpired
+		return res, nil
+	}
+	res.Content = plain // caller owns and must clear returned plaintext
+	res.HashVisible = true
 	return res, nil
 }
 

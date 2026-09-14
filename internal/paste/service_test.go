@@ -329,3 +329,71 @@ func TestServiceOptionalClockAndAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestServiceReadExpiresDuringBodyGet(t *testing.T) {
+	for _, tc := range []struct {
+		name, password string
+		missing        bool
+	}{
+		{name: "missing unprotected", missing: true},
+		{name: "present unprotected"},
+		{name: "locked protected", password: "pw"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness()
+			r := h.create(t, CreateInput{Content: "x", Password: tc.password, TTLSeconds: 30})
+			if tc.missing {
+				h.bodies.getErr = ErrNotFound
+			}
+			h.bodies.onGet = func() { h.now = h.now.Add(30 * time.Second) }
+			got, err := h.svc.Read(context.Background(), nil, r.Meta.ID, "")
+			if err != nil || got.Status != StatusExpired || got.Content != nil || got.HashVisible == r.Meta.PasswordProtected {
+				t.Fatalf("expired body lookup: %+v %v", got, err)
+			}
+			if h.audit.count(audit.PasteUnavailable) != 0 || h.bodies.marked[r.Meta.ID] || h.env.opened != 0 {
+				t.Fatal("expired lookup attempted unavailable audit or decryption")
+			}
+		})
+	}
+}
+
+func TestServiceReadExpiresDuringViewCount(t *testing.T) {
+	for _, password := range []string{"", "pw"} {
+		t.Run(map[bool]string{true: "protected", false: "unprotected"}[password != ""], func(t *testing.T) {
+			h := newHarness()
+			r := h.create(t, CreateInput{Content: "x", Password: password, TTLSeconds: 30})
+			h.metas.onView = func() { h.now = h.now.Add(30 * time.Second) }
+			got, err := h.svc.Read(context.Background(), nil, r.Meta.ID, password)
+			if err != nil || got.Status != StatusExpired || got.Content != nil || got.HashVisible == r.Meta.PasswordProtected {
+				t.Fatalf("expired view count: %+v %v", got, err)
+			}
+			if h.audit.count(audit.PasteViewed)+h.audit.count(audit.PasteUnlockSuccess) != 0 {
+				t.Fatal("success audited after view count expired")
+			}
+			for _, b := range h.env.lastOpened {
+				if b != 0 {
+					t.Fatal("late plaintext not zeroed")
+				}
+			}
+		})
+	}
+}
+
+func TestServiceReadExpiresDuringAuditWrite(t *testing.T) {
+	for _, password := range []string{"", "pw"} {
+		t.Run(map[bool]string{true: "protected", false: "unprotected"}[password != ""], func(t *testing.T) {
+			h := newHarness()
+			r := h.create(t, CreateInput{Content: "x", Password: password, TTLSeconds: 30})
+			h.audit.onRecord = func() { h.now = h.now.Add(30 * time.Second) }
+			got, err := h.svc.Read(context.Background(), nil, r.Meta.ID, password)
+			if err != nil || got.Status != StatusExpired || got.Content != nil || got.HashVisible == r.Meta.PasswordProtected {
+				t.Fatalf("expired audit write: %+v %v", got, err)
+			}
+			for _, b := range h.env.lastOpened {
+				if b != 0 {
+					t.Fatal("late plaintext not zeroed")
+				}
+			}
+		})
+	}
+}
