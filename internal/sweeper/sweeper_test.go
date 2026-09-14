@@ -311,6 +311,79 @@ func TestRunOnceDeleteFailureRetriesWithoutAudit(t *testing.T) {
 	}
 }
 
+func TestRunOnceDefersMetadataPurgeUntilFailedExpiryDeleteRetries(t *testing.T) {
+	now := testNow()
+	failed := testMeta(now.Add(-3*24*time.Hour), now.Add(-2*24*time.Hour))
+	succeeded := testMeta(now.Add(-time.Hour), now.Add(-time.Minute))
+	live := testMeta(now, now.Add(time.Hour))
+	m := newTestMetas(failed, succeeded, live)
+	b := &testBodies{deleteErr: map[uuid.UUID]error{failed.ID: errors.New("redis down")}}
+	sink := &testSink{}
+	p := &testPurger{n: 2}
+	s := New(Config{MetadataRetentionDays: 1, AuditRetentionDays: 1}, m, b, sink, p, testLog(), func() time.Time { return now })
+	var active int64
+	s.OnActiveCount(func(n int64) { active = n })
+
+	st, err := s.RunOnce(context.Background())
+	if err != nil || st != (Stats{Expired: 1, AuditPurged: 2, Active: 1}) || active != 1 {
+		t.Fatalf("first pass stats=%+v err=%v active callback=%d", st, err, active)
+	}
+	if m.purgeCalls != 0 || m.items[failed.ID].ExpiredAuditedAt != nil || m.items[succeeded.ID].ExpiredAuditedAt == nil {
+		t.Fatalf("first pass purged before retry or failed to mark success: purge calls=%d items=%v", m.purgeCalls, m.items)
+	}
+	if events := sink.byName(audit.PasteExpired); len(events) != 1 || events[0].PasteID == nil || *events[0].PasteID != succeeded.ID {
+		t.Fatalf("first pass expiry events=%v", events)
+	}
+	if len(sink.byName(audit.MetadataPurged)) != 0 || p.calls != 1 {
+		t.Fatalf("first pass retention: metadata events=%v audit purge calls=%d", sink.byName(audit.MetadataPurged), p.calls)
+	}
+
+	delete(b.deleteErr, failed.ID)
+	st, err = s.RunOnce(context.Background())
+	if err != nil || st.Expired != 1 || st.MetadataPurged != 1 || st.Active != 1 {
+		t.Fatalf("retry stats=%+v err=%v", st, err)
+	}
+	if _, ok := m.items[failed.ID]; ok {
+		t.Fatal("old metadata remained after successful retry")
+	}
+	if events := sink.byName(audit.PasteExpired); len(events) != 2 || events[1].PasteID == nil || *events[1].PasteID != failed.ID {
+		t.Fatalf("retry expiry events=%v", events)
+	}
+	if len(sink.byName(audit.MetadataPurged)) != 1 || m.purgeCalls != 1 {
+		t.Fatalf("retry metadata purge calls=%d events=%v", m.purgeCalls, sink.byName(audit.MetadataPurged))
+	}
+}
+
+func TestRunOnceDefersMetadataPurgeWhileExpiryBatchIsFull(t *testing.T) {
+	now := testNow()
+	first := testMeta(now.Add(-3*24*time.Hour), now.Add(-2*24*time.Hour))
+	second := testMeta(now.Add(-3*24*time.Hour), now.Add(-2*24*time.Hour))
+	m := newTestMetas(first, second)
+	sink := &testSink{}
+	s := New(Config{MetadataRetentionDays: 1, Batch: 1}, m, &testBodies{}, sink, nil, testLog(), func() time.Time { return now })
+
+	st, err := s.RunOnce(context.Background())
+	if err != nil || st.Expired != 1 || st.MetadataPurged != 0 || m.purgeCalls != 0 || len(m.items) != 2 {
+		t.Fatalf("full batch stats=%+v err=%v purge calls=%d items=%d", st, err, m.purgeCalls, len(m.items))
+	}
+	if len(sink.byName(audit.PasteExpired)) != 1 {
+		t.Fatalf("full batch expiry events=%v", sink.byName(audit.PasteExpired))
+	}
+
+	st, err = s.RunOnce(context.Background())
+	if err != nil || st.Expired != 1 || st.MetadataPurged != 0 || m.purgeCalls != 0 || len(m.items) != 2 {
+		t.Fatalf("second full batch stats=%+v err=%v purge calls=%d items=%d", st, err, m.purgeCalls, len(m.items))
+	}
+	if len(sink.byName(audit.PasteExpired)) != 2 {
+		t.Fatalf("both rows should be audited before purge: %v", sink.byName(audit.PasteExpired))
+	}
+
+	st, err = s.RunOnce(context.Background())
+	if err != nil || st.Expired != 0 || st.MetadataPurged != 2 || m.purgeCalls != 1 || len(m.items) != 0 {
+		t.Fatalf("drained batch stats=%+v err=%v purge calls=%d items=%d", st, err, m.purgeCalls, len(m.items))
+	}
+}
+
 func TestRunOnceErrors(t *testing.T) {
 	boom := errors.New("boom")
 	now := testNow()
