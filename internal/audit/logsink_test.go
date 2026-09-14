@@ -40,6 +40,29 @@ func TestLogSink_EmitsStructuredEvent(t *testing.T) {
 	}
 }
 
+func TestLogSink_DefaultsMissingTimestampToCurrentUTC(t *testing.T) {
+	var buf bytes.Buffer
+	sink := NewLogSink(slog.New(slog.NewJSONHandler(&buf, nil)))
+	before := time.Now().UTC()
+	sink.Record(context.Background(), Event{Event: Logout, Outcome: OutcomeSuccess})
+	after := time.Now().UTC()
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	atText, ok := got["at"].(string)
+	if !ok {
+		t.Fatalf("at = %#v, want timestamp", got["at"])
+	}
+	at, err := time.Parse(time.RFC3339Nano, atText)
+	if err != nil {
+		t.Fatalf("parse at %q: %v", atText, err)
+	}
+	if at.Before(before) || at.After(after) || atText[len(atText)-1] != 'Z' {
+		t.Errorf("at = %q, want current UTC between %v and %v", atText, before, after)
+	}
+}
+
 func TestLogSink_RequestInfoFillsEachEmptyField(t *testing.T) {
 	for _, tc := range []struct {
 		name, ip, ua, wantIP, wantUA string

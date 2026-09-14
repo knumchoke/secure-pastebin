@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"log/slog"
+	"time"
 )
 
 type logSink struct{ log *slog.Logger }
@@ -13,6 +14,9 @@ var _ Sink = (*logSink)(nil)
 func NewLogSink(log *slog.Logger) Sink { return &logSink{log: log} }
 
 func (s *logSink) Record(ctx context.Context, e Event) {
+	if e.At.IsZero() {
+		e.At = time.Now().UTC()
+	}
 	if e.IP == "" || e.UserAgent == "" {
 		ip, ua := RequestInfo(ctx)
 		if e.IP == "" {
