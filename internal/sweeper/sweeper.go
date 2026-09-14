@@ -93,9 +93,13 @@ func (s *Sweeper) RunOnce(ctx context.Context) (Stats, error) {
 		return stats, err
 	}
 	ids := make([]uuid.UUID, 0, len(expired))
+	// A full batch may leave older expired rows for a later pass. Keep their
+	// metadata until every candidate has had a chance at body deletion.
+	retryPending := len(expired) >= s.cfg.Batch
 	for _, meta := range expired {
 		if err := s.bodies.Delete(ctx, meta.ID); err != nil {
 			s.log.WarnContext(ctx, "defensive body delete failed", "paste_id", meta.ID, "err", err)
+			retryPending = true
 			continue
 		}
 		id := meta.ID
@@ -112,7 +116,7 @@ func (s *Sweeper) RunOnce(ctx context.Context) (Stats, error) {
 	}
 	stats.Expired = int64(len(ids))
 
-	if s.cfg.MetadataRetentionDays > 0 {
+	if s.cfg.MetadataRetentionDays > 0 && !retryPending {
 		cutoff := now.AddDate(0, 0, -s.cfg.MetadataRetentionDays)
 		count, err := s.metas.PurgeOlderThan(ctx, cutoff)
 		if err != nil {
