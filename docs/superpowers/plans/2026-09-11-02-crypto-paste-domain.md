@@ -58,7 +58,7 @@ internal/sweeper/sweeper_test.go         fakes
 **Interfaces:**
 - Produces: `paste.Canonicalize(content string, maxSize int64) ([]byte, error)` → `ErrInvalidUTF8`, `*ErrTooLarge`; `paste.HashHex(canonical []byte) string`; `paste.StripBOM(b []byte) []byte`; `paste.HasBOM(b []byte) bool`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `internal/paste/canonical_test.go`:
 ```go
@@ -136,12 +136,12 @@ func TestStripBOM(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `rtk go test ./internal/paste/ -run 'Canonicalize|HashHex|StripBOM' -v`
 Expected: FAIL — `undefined: Canonicalize`
 
-- [ ] **Step 3: Implement, then pin the known vector**
+- [x] **Step 3: Implement, then pin the known vector**
 
 `internal/paste/canonical.go`:
 ```go
@@ -195,12 +195,12 @@ func HashHex(canonical []byte) string {
 
 The known vector in the test was produced with `printf '\xef\xbb\xbfhello' | shasum -a 256`; if it ever fails, the canonicalisation changed — do not "fix" the constant.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `rtk go test ./internal/paste/ -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 rtk git add internal/paste/canonical.go internal/paste/canonical_test.go
@@ -219,7 +219,7 @@ rtk git commit -m "feat(ws2): canonicalisation (BOM, UTF-8, size) and SHA-256"
 - Consumes: `crypto.Gate`, `crypto.DeriveKey`, `crypto.Argon2Params`, `crypto.Zero` (WS1); `paste.EncryptedBody`, `paste.KDFParams`, `paste.WrapKEK/WrapPassword`, errors (WS1).
 - Produces: `crypto.NewEnvelope(keys map[string][]byte, activeID string, gate *Gate, params Argon2Params) (*Envelope, error)`; `*Envelope` implements `paste.Envelope`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `internal/crypto/envelope_test.go`:
 ```go
@@ -354,12 +354,12 @@ func TestNewEnvelope_Validation(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `rtk go test ./internal/crypto/ -run Envelope -v`
 Expected: FAIL — `undefined: NewEnvelope`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `internal/crypto/envelope.go`:
 ```go
@@ -556,12 +556,12 @@ func (e *Envelope) Open(ctx context.Context, id uuid.UUID, expiresAt time.Time, 
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `rtk go test ./internal/crypto/ -race -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 rtk git add internal/crypto/envelope.go internal/crypto/envelope_test.go
@@ -579,7 +579,7 @@ rtk git commit -m "feat(ws2): AES-256-GCM envelope with KEK and password wrappin
 **Interfaces:**
 - Produces: `redisstore.Connect(ctx, url string) (*redis.Client, error)` (package name `redisstore`, import path `internal/store/redis`); `redisstore.NewBodyStore(c *redis.Client) *BodyStore` implementing `paste.BodyStore`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `internal/store/redis/body_test.go`:
 ```go
@@ -683,12 +683,12 @@ func TestBodyStore_Ping(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `rtk go get github.com/redis/go-redis/v9@latest github.com/alicebob/miniredis/v2@latest && rtk go test ./internal/store/redis/ -v`
 Expected: FAIL — `undefined: NewBodyStore`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `internal/store/redis/client.go`:
 ```go
@@ -798,7 +798,7 @@ func (s *BodyStore) MarkUnavailableOnce(ctx context.Context, id uuid.UUID, ttl t
 func (s *BodyStore) Ping(ctx context.Context) error { return s.c.Ping(ctx).Err() }
 ```
 
-- [ ] **Step 4: Run tests, commit**
+- [x] **Step 4: Run tests, commit**
 
 Run: `rtk go test ./internal/store/redis/ -race -v` — Expected: PASS
 
@@ -819,7 +819,7 @@ rtk git commit -m "feat(ws2): redis client and TTL body store"
 - Consumes: `postgres.StartTestDB` (WS1 test helper), `postgres.Migrate`.
 - Produces: `postgres.NewPasteStore(pool *pgxpool.Pool) *PasteStore` implementing `paste.MetaStore`. Test helper `insertTestUser(t, pool) uuid.UUID` in `pastes_test.go` (WS3 adds its own user store; this helper inserts raw SQL).
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 `internal/store/postgres/pastes_test.go`:
 ```go
@@ -967,12 +967,12 @@ func TestIntegration_PasteStore_ExpiredAndPurge(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `PASTEBIN_INTEGRATION=1 rtk go test ./internal/store/postgres/ -run Integration_PasteStore -v`
 Expected: FAIL — `undefined: NewPasteStore`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `internal/store/postgres/pastes.go`:
 ```go
@@ -1120,7 +1120,7 @@ func (s *PasteStore) CountActive(ctx context.Context, now time.Time) (int64, err
 func (s *PasteStore) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 ```
 
-- [ ] **Step 4: Run, commit**
+- [x] **Step 4: Run, commit**
 
 Run: `PASTEBIN_INTEGRATION=1 rtk go test ./internal/store/postgres/ -run Integration_PasteStore -v` — Expected: PASS
 
@@ -1140,7 +1140,7 @@ rtk git commit -m "feat(ws2): postgres paste metadata store"
 **Interfaces:**
 - Produces: `audit.NewLogSink(log *slog.Logger) audit.Sink`; `postgres.NewAuditStore(pool, log *slog.Logger) *AuditStore` implementing `audit.Sink` plus `(*AuditStore).PurgeOlderThan(ctx, t time.Time) (int64, error)`; `(*AuditStore).Count(ctx, event string) (int64, error)` (tests/ops).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `internal/audit/logsink_test.go`:
 ```go
@@ -1220,12 +1220,12 @@ func TestIntegration_AuditStore_BadIPDoesNotFail(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `rtk go test ./internal/audit/ -v; PASTEBIN_INTEGRATION=1 rtk go test ./internal/store/postgres/ -run Integration_AuditStore -v`
 Expected: FAIL — `undefined: NewLogSink` / `NewAuditStore`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `internal/audit/logsink.go`:
 ```go
@@ -1341,7 +1341,7 @@ func (s *AuditStore) Count(ctx context.Context, event string) (int64, error) {
 }
 ```
 
-- [ ] **Step 4: Run, commit**
+- [x] **Step 4: Run, commit**
 
 Run: `rtk go test ./internal/audit/ -v && PASTEBIN_INTEGRATION=1 rtk go test ./internal/store/postgres/ -run Integration_AuditStore -v` — Expected: PASS
 
@@ -2549,6 +2549,13 @@ rtk git commit -m "test(ws2): full lifecycle integration test with real stores"
 ```
 
 ---
+
+## Execution notes
+
+- Task 2 validates stored record lengths and Argon2 parameters before decryption. Stored KDF costs cannot exceed the configured envelope budget; older, lower-cost records remain readable. Keep the configured budget at least as high as the cost used for any still-live record when changing settings. The envelope copies its keyring at construction.
+- Task 3 explicitly rounds positive sub-millisecond TTLs to Redis millisecond precision and rejects nonpositive TTLs for both bodies and unavailable markers. Redis URL parsing errors omit credentials.
+- Task 4 uses deterministic ID tie-breakers in paginated metadata lists.
+- Task 5 fills missing IP and user-agent fields independently, as required by the frozen audit sink contract. Missing log timestamps default to the current UTC time, matching the database sink.
 
 ## Done when
 

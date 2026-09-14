@@ -24,3 +24,13 @@ open http://localhost:8443
 ## Layout
 
 See spec §4.1. Contracts live in `internal/*/ports.go`, `internal/paste/types.go`, `docs/api/openapi.yaml` — changes go through `docs/api/CHANGELOG.md`.
+
+## Crypto and paste domain (WS2)
+
+Canonical text includes one leading UTF-8 BOM; other bytes, including line endings, are preserved. SHA-256 covers those canonical bytes. The envelope uses a fresh AES-256-GCM data key per paste, wrapped with either the active server key or an Argon2id-derived password key. Password-protected records carry no server-key wrap.
+
+Encrypted bodies use Redis native TTLs. PostgreSQL stores only metadata and hashes, so body expiry does not remove the integrity record. Metadata lists use stable ordering and owner filters; view counts are incremented atomically.
+
+The envelope validates stored KDF costs against its configured budget. When lowering KDF settings, wait until records using the previous settings have expired. Retain old server keys until all pastes wrapped with them have expired. Returned plaintext buffers belong to the caller and must be overwritten after use.
+
+Run domain checks with `rtk go test -race ./internal/crypto ./internal/paste ./internal/store/... ./internal/audit ./internal/sweeper`. Run Docker integration tests explicitly with `PASTEBIN_INTEGRATION=1 rtk go test -race -count=1 ./... -run Integration`; without that flag, Postgres integration tests skip.
