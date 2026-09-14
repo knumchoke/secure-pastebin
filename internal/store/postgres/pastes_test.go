@@ -230,3 +230,46 @@ func TestIntegration_PasteStoreExpiryRetentionAndCount(t *testing.T) {
 		t.Fatalf("purged row: %v", err)
 	}
 }
+
+func TestIntegration_PasteStorePurgeCompletedOlderThan(t *testing.T) {
+	pool := migratedDB(t)
+	store := NewPasteStore(pool)
+	ctx := context.Background()
+	owner := insertTestUser(t, pool, "completed-retention")
+	cutoff := time.Now().UTC().Truncate(time.Microsecond).Add(-24 * time.Hour)
+	oldAudited := testMeta(owner, cutoff.Add(-2*time.Hour))
+	oldDeleted := testMeta(owner, cutoff.Add(-3*time.Hour))
+	oldPending := testMeta(owner, cutoff.Add(-4*time.Hour))
+	boundaryAudited := testMeta(owner, cutoff)
+	recentAudited := testMeta(owner, cutoff.Add(time.Hour))
+	for _, m := range []paste.PasteMeta{oldAudited, oldDeleted, oldPending, boundaryAudited, recentAudited} {
+		if err := store.Create(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.MarkExpiredAudited(ctx, []uuid.UUID{oldAudited.ID, boundaryAudited.ID, recentAudited.ID}, cutoff); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkDeleted(ctx, oldDeleted.ID, owner, cutoff); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := store.PurgeCompletedOlderThan(ctx, cutoff)
+	if err != nil || n != 2 {
+		t.Fatalf("completed purge count=%d err=%v", n, err)
+	}
+	for _, id := range []uuid.UUID{oldAudited.ID, oldDeleted.ID} {
+		if _, err := store.Get(ctx, id); !errors.Is(err, paste.ErrNotFound) {
+			t.Fatalf("completed row %s survived: %v", id, err)
+		}
+	}
+	for _, id := range []uuid.UUID{oldPending.ID, boundaryAudited.ID, recentAudited.ID} {
+		if _, err := store.Get(ctx, id); err != nil {
+			t.Fatalf("pending or cutoff row %s removed: %v", id, err)
+		}
+	}
+	n, err = store.PurgeCompletedOlderThan(ctx, cutoff)
+	if err != nil || n != 0 {
+		t.Fatalf("repeat purge count=%d err=%v", n, err)
+	}
+}

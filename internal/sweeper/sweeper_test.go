@@ -125,6 +125,31 @@ func (m *testMetas) CountActive(_ context.Context, now time.Time) (int64, error)
 }
 func (*testMetas) Ping(context.Context) error { return nil }
 
+type testCompletedMetas struct {
+	*testMetas
+	completedErr    error
+	completedCalls  int
+	completedCutoff time.Time
+}
+
+func (m *testCompletedMetas) PurgeCompletedOlderThan(_ context.Context, cutoff time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.completedCalls++
+	m.completedCutoff = cutoff
+	if m.completedErr != nil {
+		return 0, m.completedErr
+	}
+	var count int64
+	for id, p := range m.items {
+		if p.CreatedAt.Before(cutoff) && (p.DeletedAt != nil || p.ExpiredAuditedAt != nil) {
+			delete(m.items, id)
+			count++
+		}
+	}
+	return count, nil
+}
+
 type testBodies struct {
 	mu        sync.Mutex
 	deleted   []uuid.UUID
@@ -381,6 +406,76 @@ func TestRunOnceDefersMetadataPurgeWhileExpiryBatchIsFull(t *testing.T) {
 	st, err = s.RunOnce(context.Background())
 	if err != nil || st.Expired != 0 || st.MetadataPurged != 2 || m.purgeCalls != 1 || len(m.items) != 0 {
 		t.Fatalf("drained batch stats=%+v err=%v purge calls=%d items=%d", st, err, m.purgeCalls, len(m.items))
+	}
+}
+
+func TestRunOncePurgeCompletedWhileExpiryDeleteNeedsRetry(t *testing.T) {
+	now := testNow()
+	oldPending := testMeta(now.Add(-3*24*time.Hour), now.Add(-2*24*time.Hour))
+	oldAudited := testMeta(now.Add(-3*24*time.Hour), now.Add(-2*24*time.Hour))
+	oldAudited.ExpiredAuditedAt = &now
+	m := &testCompletedMetas{testMetas: newTestMetas(oldPending, oldAudited)}
+	b := &testBodies{deleteErr: map[uuid.UUID]error{oldPending.ID: errors.New("redis down")}}
+	sink := &testSink{}
+	s := New(Config{MetadataRetentionDays: 1}, m, b, sink, nil, testLog(), func() time.Time { return now })
+	st, err := s.RunOnce(context.Background())
+	if err != nil || st.Expired != 0 || st.MetadataPurged != 1 || m.completedCalls != 1 || m.purgeCalls != 0 {
+		t.Fatalf("failed delete stats=%+v err=%v completed=%d legacy=%d", st, err, m.completedCalls, m.purgeCalls)
+	}
+	if !m.completedCutoff.Equal(now.AddDate(0, 0, -1)) {
+		t.Fatalf("completed cutoff=%v", m.completedCutoff)
+	}
+	if _, ok := m.items[oldPending.ID]; !ok {
+		t.Fatal("failed expiry row was purged")
+	}
+	if _, ok := m.items[oldAudited.ID]; ok {
+		t.Fatal("already audited row was retained")
+	}
+	if len(sink.byName(audit.PasteExpired)) != 0 || len(sink.byName(audit.MetadataPurged)) != 1 {
+		t.Fatalf("first pass events=%v", sink.events)
+	}
+
+	delete(b.deleteErr, oldPending.ID)
+	st, err = s.RunOnce(context.Background())
+	if err != nil || st.Expired != 1 || st.MetadataPurged != 1 || m.completedCalls != 2 {
+		t.Fatalf("retry stats=%+v err=%v completed=%d", st, err, m.completedCalls)
+	}
+	if _, ok := m.items[oldPending.ID]; ok {
+		t.Fatal("retried expiry row was retained")
+	}
+}
+
+func TestRunOncePurgeCompletedWhileExpiryBatchIsFull(t *testing.T) {
+	now := testNow()
+	first := testMeta(now.Add(-3*24*time.Hour), now.Add(-2*24*time.Hour))
+	second := testMeta(now.Add(-3*24*time.Hour), now.Add(-2*24*time.Hour))
+	alreadyAudited := testMeta(now.Add(-3*24*time.Hour), now.Add(-2*24*time.Hour))
+	alreadyAudited.ExpiredAuditedAt = &now
+	m := &testCompletedMetas{testMetas: newTestMetas(first, second, alreadyAudited)}
+	sink := &testSink{}
+	s := New(Config{MetadataRetentionDays: 1, Batch: 1}, m, &testBodies{}, sink, nil, testLog(), func() time.Time { return now })
+	st, err := s.RunOnce(context.Background())
+	if err != nil || st.Expired != 1 || st.MetadataPurged != 2 || m.completedCalls != 1 || m.purgeCalls != 0 {
+		t.Fatalf("first full batch stats=%+v err=%v completed=%d legacy=%d", st, err, m.completedCalls, m.purgeCalls)
+	}
+	if len(m.items) != 1 || len(sink.byName(audit.PasteExpired)) != 1 {
+		t.Fatalf("first full batch remaining=%d events=%v", len(m.items), sink.events)
+	}
+	st, err = s.RunOnce(context.Background())
+	if err != nil || st.Expired != 1 || st.MetadataPurged != 1 || m.completedCalls != 2 || len(m.items) != 0 {
+		t.Fatalf("second pass stats=%+v err=%v completed=%d remaining=%d", st, err, m.completedCalls, len(m.items))
+	}
+	if len(sink.byName(audit.PasteExpired)) != 2 {
+		t.Fatalf("expiry events=%v", sink.byName(audit.PasteExpired))
+	}
+}
+
+func TestRunOnceCompletedPurgeError(t *testing.T) {
+	boom := errors.New("completed purge unavailable")
+	m := &testCompletedMetas{testMetas: newTestMetas(), completedErr: boom}
+	s := New(Config{MetadataRetentionDays: 1}, m, &testBodies{}, &testSink{}, nil, testLog(), testNow)
+	if _, err := s.RunOnce(context.Background()); !errors.Is(err, boom) || m.purgeCalls != 0 {
+		t.Fatalf("completed purge error=%v legacy calls=%d", err, m.purgeCalls)
 	}
 }
 

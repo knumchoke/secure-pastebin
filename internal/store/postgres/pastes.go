@@ -132,6 +132,16 @@ func (s *PasteStore) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int6
 	return result.RowsAffected(), nil
 }
 
+// PurgeCompletedOlderThan retains expired rows whose body cleanup and expiry
+// audit have not yet completed, so the sweeper can retry them in later passes.
+func (s *PasteStore) PurgeCompletedOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
+	result, err := s.pool.Exec(ctx, `DELETE FROM pastes WHERE created_at < $1 AND (deleted_at IS NOT NULL OR expired_audited_at IS NOT NULL)`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 func (s *PasteStore) CountActive(ctx context.Context, now time.Time) (int64, error) {
 	var count int64
 	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM pastes WHERE expires_at > $1 AND deleted_at IS NULL`, now).Scan(&count)

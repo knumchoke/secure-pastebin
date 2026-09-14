@@ -17,6 +17,12 @@ type AuditPurger interface {
 	PurgeOlderThan(ctx context.Context, t time.Time) (int64, error)
 }
 
+// completedMetaPurger is an optional safer retention operation. Stores that
+// lack it use the original purge only after all expiry work is clear.
+type completedMetaPurger interface {
+	PurgeCompletedOlderThan(ctx context.Context, t time.Time) (int64, error)
+}
+
 type Config struct {
 	Interval              time.Duration
 	MetadataRetentionDays int
@@ -116,9 +122,15 @@ func (s *Sweeper) RunOnce(ctx context.Context) (Stats, error) {
 	}
 	stats.Expired = int64(len(ids))
 
-	if s.cfg.MetadataRetentionDays > 0 && !retryPending {
+	if s.cfg.MetadataRetentionDays > 0 {
 		cutoff := now.AddDate(0, 0, -s.cfg.MetadataRetentionDays)
-		count, err := s.metas.PurgeOlderThan(ctx, cutoff)
+		var count int64
+		var err error
+		if completed, ok := s.metas.(completedMetaPurger); ok {
+			count, err = completed.PurgeCompletedOlderThan(ctx, cutoff)
+		} else if !retryPending {
+			count, err = s.metas.PurgeOlderThan(ctx, cutoff)
+		}
 		if err != nil {
 			return stats, err
 		}
