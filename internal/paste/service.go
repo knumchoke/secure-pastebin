@@ -206,13 +206,14 @@ func (s *service) Delete(ctx context.Context, p Principal, id uuid.UUID) error {
 	if m.OwnerID != p.UserID && !p.IsAdmin {
 		return ErrForbidden
 	}
-	if m.DeletedAt != nil {
+	now := s.d.Now()
+	if m.DeletedAt != nil || !now.Before(m.ExpiresAt) {
 		return nil
 	}
 	if err := s.d.Bodies.Delete(ctx, id); err != nil {
 		return fmt.Errorf("delete body: %w", err)
 	}
-	if err := s.d.Metas.MarkDeleted(ctx, id, p.UserID, s.d.Now()); err != nil {
+	if err := s.d.Metas.MarkDeleted(ctx, id, p.UserID, now); err != nil {
 		return fmt.Errorf("mark deleted: %w", err)
 	}
 	s.record(ctx, audit.PasteDeleted, &p.UserID, &id, audit.OutcomeSuccess, map[string]any{"by_admin": p.IsAdmin && m.OwnerID != p.UserID})
