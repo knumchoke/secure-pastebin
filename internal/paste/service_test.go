@@ -217,11 +217,6 @@ func TestServiceVerifyDeleteList(t *testing.T) {
 	if e != nil || v.Match || h.audit.last().Details["match"] != false {
 		t.Fatal(e)
 	}
-	h.now = h.now.Add(time.Hour)
-	v, e = h.svc.Verify(ctx, r.Meta.ID, r.Meta.ContentHash)
-	if e != nil || !v.Match || v.Status != StatusExpired {
-		t.Fatal(e)
-	}
 	if e := h.svc.Delete(ctx, bob, r.Meta.ID); !errors.Is(e, ErrForbidden) {
 		t.Fatal(e)
 	}
@@ -266,6 +261,51 @@ func TestServiceVerifyDeleteList(t *testing.T) {
 	filtered, e := h.svc.ListAll(ctx, admin, &b.Meta.OwnerID, Page{})
 	if e != nil || len(filtered) != 1 {
 		t.Fatal(e)
+	}
+}
+
+func TestServiceDeleteExpiredIsNoop(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		elapsed time.Duration
+	}{
+		{name: "at expiry"},
+		{name: "past expiry", elapsed: time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness()
+			ctx := context.Background()
+			r := h.create(t, CreateInput{Content: "x", TTLSeconds: 30})
+			h.now = r.Meta.ExpiresAt.Add(tc.elapsed)
+
+			// Expiry cleanup owns the body deletion, metadata transition, and
+			// paste_expired audit. Port failures make accidental calls visible.
+			boom := errors.New("expired delete must not call mutation ports")
+			h.bodies.deleteErr = boom
+			h.metas.deleteErr = boom
+			if err := h.svc.Delete(ctx, alice, r.Meta.ID); err != nil {
+				t.Fatalf("delete expired paste: %v", err)
+			}
+
+			m, err := h.metas.Get(ctx, r.Meta.ID)
+			if err != nil || m.DeletedAt != nil || m.DeletedBy != nil || m.ExpiredAuditedAt != nil {
+				t.Fatalf("expired metadata changed: %+v, err=%v", m, err)
+			}
+			if _, ok := h.bodies.items[r.Meta.ID]; !ok {
+				t.Fatal("expired body was removed before sweeper cleanup")
+			}
+			if h.audit.count(audit.PasteDeleted) != 0 {
+				t.Fatal("expired delete emitted paste_deleted")
+			}
+			pending, err := h.metas.ListExpiredUnaudited(ctx, h.now, 10)
+			if err != nil || len(pending) != 1 || pending[0].ID != r.Meta.ID {
+				t.Fatalf("expired paste unavailable to sweeper: %+v, err=%v", pending, err)
+			}
+			verified, err := h.svc.Verify(ctx, r.Meta.ID, r.Meta.ContentHash)
+			if err != nil || !verified.Match || verified.Status != StatusExpired {
+				t.Fatalf("verify after expired delete: %+v, err=%v", verified, err)
+			}
+		})
 	}
 }
 
