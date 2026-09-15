@@ -1,6 +1,6 @@
 # WS3 — Auth, Sessions & Rate Limits Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Implement local username/password authentication (argon2id), OIDC authorization-code + PKCE login with a mandatory group gate, Redis-backed sessions, the Redis rate limiter (fail closed), the Postgres user store, and the `pastebin user …` CLI.
 
@@ -56,7 +56,7 @@ internal/cli/user_test.go
 **Interfaces:**
 - Produces: `auth.RandomToken(nBytes int) string` (base64url, no padding); `auth.NewArgon2Hasher(gate *crypto.Gate, params crypto.Argon2Params) *Argon2Hasher` implementing `auth.PasswordHasher`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `internal/auth/hasher_test.go`:
 ```go
@@ -109,12 +109,12 @@ func TestArgon2Hasher_Busy(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `rtk go test ./internal/auth/ -run 'RandomToken|Argon2' -v`
 Expected: FAIL — `undefined: RandomToken`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `internal/auth/random.go`:
 ```go
@@ -177,7 +177,7 @@ func (h *Argon2Hasher) Verify(ctx context.Context, phc, password string) (bool, 
 }
 ```
 
-- [ ] **Step 4: Run, commit**
+- [x] **Step 4: Run, commit**
 
 Run: `rtk go test ./internal/auth/ -v` — Expected: PASS
 
