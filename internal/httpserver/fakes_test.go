@@ -74,7 +74,7 @@ func newFakeSessions() *fakeSessions { return &fakeSessions{items: map[string]au
 func (f *fakeSessions) Create(_ context.Context, uid uuid.UUID, _, abs time.Duration) (auth.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s := auth.Session{ID: auth.RandomToken(32), UserID: uid, CreatedAt: time.Now(), AbsoluteExpiry: time.Now().Add(abs), CSRFToken: auth.RandomToken(32)}
+	s := auth.Session{ID: randomToken(32), UserID: uid, CreatedAt: time.Now(), AbsoluteExpiry: time.Now().Add(abs), CSRFToken: randomToken(32)}
 	f.items[s.ID] = s
 	f.created++
 	return s, nil
@@ -151,7 +151,7 @@ func newFakeChallenger() *fakeChallenger {
 	return &fakeChallenger{tokens: map[string]uuid.UUID{}, xs: map[string]int{}}
 }
 func (f *fakeChallenger) Issue(_ context.Context, uid uuid.UUID) (challenge.Issued, error) {
-	id := auth.RandomToken(8)
+	id := randomToken(8)
 	f.xs[id] = 100
 	return challenge.Issued{ID: id, BackgroundPNG: []byte("png"), PiecePNG: []byte("png"), PieceY: 20, Width: 320, Height: 160, ExpiresIn: 120 * time.Second}, nil
 }
@@ -164,7 +164,7 @@ func (f *fakeChallenger) Verify(_ context.Context, uid uuid.UUID, id string, x i
 	if x != want {
 		return "", challenge.ErrChallengeFailed
 	}
-	tok := auth.RandomToken(16)
+	tok := randomToken(16)
 	f.tokens[tok] = uid
 	return tok, nil
 }

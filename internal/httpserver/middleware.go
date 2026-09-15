@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/knumchoke/secure-pastebin/internal/audit"
-	"github.com/knumchoke/secure-pastebin/internal/auth"
 	"github.com/knumchoke/secure-pastebin/internal/logging"
 )
 
@@ -48,7 +47,7 @@ func recoverer(log *slog.Logger) middleware {
 func requestID() middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id := auth.RandomToken(12)
+			id := randomToken(12)
 			w.Header().Set("X-Request-Id", id)
 			next.ServeHTTP(w, r.WithContext(logging.WithRequestID(r.Context(), id)))
 		})
