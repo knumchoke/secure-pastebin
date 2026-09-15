@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"sync"
 	"sync/atomic"
 )
 
@@ -18,7 +17,6 @@ const (
 
 // Metrics is a minimal Prometheus-text exporter (no client library, spec D1).
 type Metrics struct {
-	mu       sync.Mutex
 	counters map[string]*atomic.Int64
 	http     [4]atomic.Int64 // 2xx,3xx,4xx,5xx
 	active   atomic.Int64
