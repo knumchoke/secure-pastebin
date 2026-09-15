@@ -38,3 +38,9 @@ The envelope validates stored KDF costs against its configured budget. When lowe
 The sweeper performs defensive expiry cleanup and retention purges, with an active-count callback for metrics. Set either retention period to zero to disable that purge. Postgres metadata retention purges completed expiry/deletion records while preserving rows that still need cleanup. Audit delivery follows the existing best-effort sink contract: a failed expiry mark can cause a repeat event on retry.
 
 Run domain checks with `rtk go test -race ./internal/crypto ./internal/paste ./internal/store/... ./internal/audit ./internal/sweeper`. Run Docker integration tests explicitly with `PASTEBIN_INTEGRATION=1 rtk go test -race -count=1 ./... -run Integration`; without that flag, Postgres integration tests skip.
+
+## Authentication, sessions and rate limits (WS3)
+
+Authentication foundations provide cryptographically random tokens and Argon2id password hashing through the shared KDF concurrency gate. Gate saturation returns the domain KDF-busy error. The Postgres user store supports local accounts and OIDC identities keyed by issuer and subject; OIDC profile updates preserve account identity and locally disabled status while refreshing display name, admin membership, and last-login time.
+
+WS3 implementation is in progress; see its plan for completed tasks. Run user-store integration checks with `rtk proxy env GOTOOLCHAIN=go1.26.0 PASTEBIN_INTEGRATION=1 go test -race ./internal/store/postgres -run Integration_UserStore`.
