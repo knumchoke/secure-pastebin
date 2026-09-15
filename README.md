@@ -31,6 +31,10 @@ Canonical text includes one leading UTF-8 BOM; other bytes, including line endin
 
 Encrypted bodies use Redis native TTLs. PostgreSQL stores only metadata and hashes, so body expiry does not remove the integrity record. Metadata lists use stable ordering and owner filters; view counts are incremented atomically.
 
+The paste service validates size, UTF-8, passwords, and TTL bounds; supports protected and unprotected reads; and restricts deletion to owners or administrators. Hash verification remains available while metadata is retained. Time spent encrypting is deducted from the body TTL, and read paths recheck expiry after blocking operations before returning plaintext.
+
 The envelope validates stored KDF costs against its configured budget. When lowering KDF settings, wait until records using the previous settings have expired. Retain old server keys until all pastes wrapped with them have expired. Returned plaintext buffers belong to the caller and must be overwritten after use.
+
+The sweeper performs defensive expiry cleanup and retention purges, with an active-count callback for metrics. Set either retention period to zero to disable that purge. Postgres metadata retention purges completed expiry/deletion records while preserving rows that still need cleanup. Audit delivery follows the existing best-effort sink contract: a failed expiry mark can cause a repeat event on retry.
 
 Run domain checks with `rtk go test -race ./internal/crypto ./internal/paste ./internal/store/... ./internal/audit ./internal/sweeper`. Run Docker integration tests explicitly with `PASTEBIN_INTEGRATION=1 rtk go test -race -count=1 ./... -run Integration`; without that flag, Postgres integration tests skip.
