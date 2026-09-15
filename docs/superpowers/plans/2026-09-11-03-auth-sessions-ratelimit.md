@@ -197,7 +197,7 @@ rtk git commit -m "feat(ws3): random tokens and gated argon2 password hasher"
 **Interfaces:**
 - Produces: `postgres.NewUserStore(pool) *UserStore` implementing `auth.UserStore`.
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 `internal/store/postgres/users_test.go`:
 ```go
@@ -279,12 +279,12 @@ func TestIntegration_UserStore_OIDCUpsert(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `PASTEBIN_INTEGRATION=1 rtk go test ./internal/store/postgres/ -run Integration_UserStore -v`
 Expected: FAIL — `undefined: NewUserStore`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `internal/store/postgres/users.go`:
 ```go
@@ -414,7 +414,7 @@ func (s *UserStore) List(ctx context.Context) ([]auth.User, error) {
 }
 ```
 
-- [ ] **Step 4: Run, commit**
+- [x] **Step 4: Run, commit**
 
 Run: `PASTEBIN_INTEGRATION=1 rtk go test ./internal/store/postgres/ -run Integration_UserStore -v` — Expected: PASS
 
