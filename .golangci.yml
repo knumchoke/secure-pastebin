@@ -23,3 +23,6 @@ linters:
     rules:
       - path: _test\.go
         linters: [noctx] # httptest.NewRequest in handler tests is fine
+      - path: _test\.go
+        linters: [gosec]
+        text: G124 # test requests build bare cookies on purpose

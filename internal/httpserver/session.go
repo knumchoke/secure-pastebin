@@ -119,14 +119,14 @@ func (h *handlers) csrf() middleware {
 func (h *handlers) secureCookies() bool { return strings.HasPrefix(h.cfg.AppBaseURL, "https://") }
 
 func (h *handlers) setSessionCookie(w http.ResponseWriter, sess auth.Session) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite=Strict set; Secure derives from APP_BASE_URL scheme
 		Name: sessionCookie, Value: sess.ID, Path: "/", HttpOnly: true, Secure: h.secureCookies(),
 		SameSite: http.SameSiteStrictMode, Expires: sess.AbsoluteExpiry,
 	})
 }
 
 func (h *handlers) clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- expired cookie; same flags as setSessionCookie
 		Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: h.secureCookies(),
 		SameSite: http.SameSiteStrictMode, MaxAge: -1,
 	})

@@ -26,7 +26,7 @@ func loadSpec(t *testing.T) {
 	t.Helper()
 	specOnce.Do(func() {
 		p := filepath.Join("..", "..", "docs", "api", "openapi.yaml")
-		b, err := os.ReadFile(p)
+		b, err := os.ReadFile(p) // #nosec G304 -- fixed repo-relative path
 		if err != nil {
 			panic(err)
 		}
