@@ -2568,4 +2568,4 @@ rtk git commit -m "test(ws2): full lifecycle integration test with real stores"
 - [x] `PASTEBIN_INTEGRATION=1 rtk go test ./... -run Integration` green with Docker.
 - [x] Coverage ≥ 80 % on `internal/crypto`, `internal/paste` (`rtk go test -cover ./internal/crypto/ ./internal/paste/`).
 - [x] `rtk make lint` clean; `grep -rn "Content\b\|password" internal/paste/service.go | grep -i "log\."` returns nothing (no content/password logging).
-- [ ] PR opened against `main` with this list.
+- [x] PR opened against `main` with this list: [draft PR #1](https://github.com/knumchoke/secure-pastebin/pull/1). WS1 must land on GitHub main before integration; external Claude security review is pending.
