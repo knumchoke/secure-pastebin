@@ -1387,7 +1387,7 @@ Semantics (spec §7):
 - `Delete`: not owner and not admin → `ErrForbidden`; already deleted → nil; `Bodies.Delete`, `Metas.MarkDeleted`, audit `paste_deleted`.
 - `ListAll`: non-admin → `ErrForbidden`.
 
-- [ ] **Step 1: Write the fakes**
+- [x] **Step 1: Write the fakes**
 
 `internal/paste/fakes_test.go`:
 ```go
@@ -1609,7 +1609,7 @@ func (f *fakeAudit) names() []string {
 }
 ```
 
-- [ ] **Step 2: Write the failing service tests**
+- [x] **Step 2: Write the failing service tests**
 
 `internal/paste/service_test.go`:
 ```go
@@ -1858,12 +1858,12 @@ func countOf(xs []string, s string) int {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `rtk go test ./internal/paste/ -run 'Create|Read|Verify|Delete|List' -v`
 Expected: FAIL — `undefined: NewService`
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 `internal/paste/service.go`:
 ```go
@@ -2069,12 +2069,12 @@ func zero(b []byte) {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `rtk go test ./internal/paste/ -race -v`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 rtk git add internal/paste
@@ -2107,7 +2107,7 @@ func (s *Sweeper) OnActiveCount(fn func(int64))                   // WS5 metrics
 type Stats struct{ Expired, MetadataPurged, AuditPurged, Active int64 }
 ```
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `internal/sweeper/sweeper_test.go`:
 ```go
@@ -2275,12 +2275,12 @@ func TestRun_StopsOnCancel(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `rtk go test ./internal/sweeper/ -v`
 Expected: FAIL — `undefined: New`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `internal/sweeper/sweeper.go`:
 ```go
@@ -2431,7 +2431,7 @@ func (s *Sweeper) RunOnce(ctx context.Context) (Stats, error) {
 }
 ```
 
-- [ ] **Step 4: Run tests, lint, commit**
+- [x] **Step 4: Run tests, lint, commit**
 
 Run: `rtk go test ./internal/sweeper/ -race -v && rtk make lint` — Expected: PASS, lint clean
 
@@ -2447,7 +2447,7 @@ rtk git commit -m "feat(ws2): expiry and retention sweeper"
 **Files:**
 - Create: `internal/paste/integration_test.go` — wires real `crypto.Envelope`, `redisstore.BodyStore` (miniredis), `postgres.PasteStore` + `postgres.AuditStore` (testcontainers) through `paste.NewService`, proving acceptance criteria 5–7 at the domain level.
 
-- [ ] **Step 1: Write the test**
+- [x] **Step 1: Write the test**
 
 `internal/paste/integration_test.go`:
 ```go
@@ -2536,12 +2536,12 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run**
+- [x] **Step 2: Run**
 
 Run: `PASTEBIN_INTEGRATION=1 rtk go test ./internal/paste/ -run Integration -v`
 Expected: PASS
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 rtk git add internal/paste/integration_test.go
@@ -2556,11 +2556,16 @@ rtk git commit -m "test(ws2): full lifecycle integration test with real stores"
 - Task 3 explicitly rounds positive sub-millisecond TTLs to Redis millisecond precision and rejects nonpositive TTLs for both bodies and unavailable markers. Redis URL parsing errors omit credentials.
 - Task 4 uses deterministic ID tie-breakers in paginated metadata lists.
 - Task 5 fills missing IP and user-agent fields independently, as required by the frozen audit sink contract. Missing log timestamps default to the current UTC time, matching the database sink.
+- Task 6 subtracts encryption time from the body TTL and rechecks expiry after blocking read operations before releasing plaintext. Metadata-insert rollback uses a bounded detached context so request cancellation does not suppress cleanup. Invalid UTF-8 passwords are rejected.
+- Task 7 uses UTC calendar subtraction for retention cutoffs. An optional completed-metadata purge capability on the Postgres implementation removes only old deleted or expiry-audited rows, allowing retention to proceed without discarding cleanup retries. The frozen MetaStore interface and its original PurgeOlderThan semantics remain unchanged; other implementations use a conservative fallback that defers purging while an expiry batch is full or a body deletion failed. Audit delivery remains best effort under the frozen sink contract.
+
+- Task 8 uses a local testcontainers helper because the WS1 StartTestDB helper lives in a test-only file and cannot be imported by an external test package. The lifecycle test uses Docker Postgres, miniredis, and the real envelope and domain service.
+- Final validation on Go 1.26.0: make check, all Docker integration tests with the race detector, go vet, and go mod verify passed. Statement coverage: crypto 85.5%, paste 100.0%. Frozen contracts remain unchanged; the paste service has no logging calls.
 
 ## Done when
 
-- [ ] `rtk go test -race ./internal/crypto/ ./internal/paste/ ./internal/store/... ./internal/audit/ ./internal/sweeper/` green.
-- [ ] `PASTEBIN_INTEGRATION=1 rtk go test ./... -run Integration` green with Docker.
-- [ ] Coverage ≥ 80 % on `internal/crypto`, `internal/paste` (`rtk go test -cover ./internal/crypto/ ./internal/paste/`).
-- [ ] `rtk make lint` clean; `grep -rn "Content\b\|password" internal/paste/service.go | grep -i "log\."` returns nothing (no content/password logging).
+- [x] `rtk go test -race ./internal/crypto/ ./internal/paste/ ./internal/store/... ./internal/audit/ ./internal/sweeper/` green.
+- [x] `PASTEBIN_INTEGRATION=1 rtk go test ./... -run Integration` green with Docker.
+- [x] Coverage ≥ 80 % on `internal/crypto`, `internal/paste` (`rtk go test -cover ./internal/crypto/ ./internal/paste/`).
+- [x] `rtk make lint` clean; `grep -rn "Content\b\|password" internal/paste/service.go | grep -i "log\."` returns nothing (no content/password logging).
 - [ ] PR opened against `main` with this list.
