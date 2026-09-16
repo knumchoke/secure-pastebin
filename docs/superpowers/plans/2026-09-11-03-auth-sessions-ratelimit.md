@@ -434,7 +434,7 @@ rtk git commit -m "feat(ws3): postgres user store with OIDC upsert"
 **Interfaces:**
 - Produces: `redisstore.NewSessionStore(c *redis.Client, now func() time.Time) *SessionStore` implementing `auth.SessionStore`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `internal/store/redis/sessions_test.go`:
 ```go
@@ -507,12 +507,12 @@ func TestSessionStore_IdleExpiry(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `rtk go test ./internal/store/redis/ -run Session -v`
 Expected: FAIL — `undefined: NewSessionStore`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `internal/store/redis/sessions.go`:
 ```go
@@ -623,7 +623,7 @@ func (s *SessionStore) Delete(ctx context.Context, id string) error {
 }
 ```
 
-- [ ] **Step 4: Run, commit**
+- [x] **Step 4: Run, commit**
 
 Run: `rtk go test ./internal/store/redis/ -race -v` — Expected: PASS
 
@@ -1931,6 +1931,10 @@ rtk git commit -m "feat(ws3): pastebin user CLI (create/set-password/disable/ena
 ```
 
 ---
+
+## Execution notes
+
+- Task 3 stores precise timestamps while accepting Unix-second records. Redis create and touch use atomic Lua with absolute millisecond deadlines, and time is rechecked after blocking I/O. This prevents delayed commands from extending sessions past their absolute expiry. Regression tests advance the clock during Redis reads and writes.
 
 ## Done when
 
