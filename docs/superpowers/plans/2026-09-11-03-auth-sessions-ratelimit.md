@@ -643,7 +643,7 @@ rtk git commit -m "feat(ws3): redis session store with idle and absolute expiry"
 **Interfaces:**
 - Produces: `auth.NewLocalAuth(users UserStore, hasher PasswordHasher, sink audit.Sink, now func() time.Time) (*LocalAuth, error)` implementing `auth.LocalAuthenticator`. Constructor pre-computes a dummy PHC hash used for unknown users.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `internal/auth/local_test.go`:
 ```go
@@ -792,12 +792,12 @@ func TestLocalAuth(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `rtk go test ./internal/auth/ -run LocalAuth -v`
 Expected: FAIL — `undefined: NewLocalAuth`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `internal/auth/local.go`:
 ```go
@@ -872,7 +872,7 @@ func (l *LocalAuth) Authenticate(ctx context.Context, username, password string)
 }
 ```
 
-- [ ] **Step 4: Run, commit**
+- [x] **Step 4: Run, commit**
 
 Run: `rtk go test ./internal/auth/ -race -v` — Expected: PASS
 
@@ -1935,6 +1935,8 @@ rtk git commit -m "feat(ws3): pastebin user CLI (create/set-password/disable/ena
 ## Execution notes
 
 - Task 3 stores precise timestamps while accepting Unix-second records. Redis create and touch use atomic Lua with absolute millisecond deadlines, and time is rechecked after blocking I/O. This prevents delayed commands from extending sessions past their absolute expiry. Regression tests advance the clock during Redis reads and writes.
+
+- Task 4 propagates KDF busy, cancellation, and other verifier errors on dummy verification paths as well as known-user paths, avoiding different responses based on account existence under gate saturation.
 
 ## Done when
 
