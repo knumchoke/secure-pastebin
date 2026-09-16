@@ -235,13 +235,17 @@ func TestUserSetPasswordUsesRealArgon2AndRejectsOIDC(t *testing.T) {
 }
 
 func TestUserDisableEnableListAndAudit(t *testing.T) {
-	deps, users, sink, _ := newUserTestDeps()
+	deps, users, sink, hasher := newUserTestDeps()
+	passwordHash, err := hasher.Hash(context.Background(), "list-test-password")
+	if err != nil {
+		t.Fatalf("hash list fixture password: %v", err)
+	}
 	lastLogin := time.Date(2026, 9, 16, 3, 4, 5, 0, time.FixedZone("test", 7*60*60))
 	users.byName["dana"] = auth.User{
 		ID:           uuid.New(),
 		Username:     "dana",
 		Provider:     auth.ProviderLocal,
-		PasswordHash: "$argon2id$must-never-be-listed",
+		PasswordHash: passwordHash,
 		LastLoginAt:  &lastLogin,
 	}
 	if code, _, stderr := runUserTest(t, deps, "", "disable", "--username", "dana"); code != 0 || !users.byName["dana"].Disabled {
@@ -260,7 +264,7 @@ func TestUserDisableEnableListAndAudit(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "dana") || !strings.Contains(stdout, "local") || !strings.Contains(stdout, "2026-09-15T20:04:05Z") {
 		t.Fatalf("list code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
-	if strings.Contains(stdout+stderr, "$argon2id$") || strings.Contains(stdout+stderr, "must-never-be-listed") {
+	if strings.Contains(stdout+stderr, passwordHash) || strings.Contains(stdout+stderr, "$argon2id$") {
 		t.Fatalf("list exposed password hash: stdout=%q stderr=%q", stdout, stderr)
 	}
 	if code, _, stderr := runUserTest(t, deps, "", "disable", "--username", "missing"); code != 1 || !strings.Contains(stderr, "not found") {
