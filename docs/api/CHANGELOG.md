@@ -5,6 +5,7 @@ Record every change to `openapi.yaml`, `internal/*/ports.go`, `internal/paste/ty
 ## 1.0.1 — 2026-09-16
 - Added `auth.OIDCState` and `auth.OIDCStateStore` as additive authentication contracts.
 - Added runtime dependencies `github.com/coreos/go-oidc/v3` and `golang.org/x/oauth2`, plus test-only signing dependency `github.com/go-jose/go-jose/v4`.
+- Added runtime dependency `golang.org/x/term` for no-echo terminal password input in the user CLI.
 
 ## 1.0.0 — 2026-09-11
 - Initial contract (WS1).
