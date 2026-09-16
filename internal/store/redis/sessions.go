@@ -26,9 +26,12 @@ redis.call("HSET", KEYS[1],
   "created_at", ARGV[2],
   "abs_exp", ARGV[3],
   "csrf", ARGV[4])
-if redis.call("PEXPIRE", KEYS[1], ARGV[5]) ~= 1 then
+if redis.call("PEXPIREAT", KEYS[1], ARGV[5]) ~= 1 then
   redis.call("DEL", KEYS[1])
   return redis.error_reply("failed to expire session")
+end
+if redis.call("EXISTS", KEYS[1]) == 0 then
+  return -1
 end
 return 1
 `)
@@ -39,7 +42,7 @@ end
 if redis.call("HGET", KEYS[1], "abs_exp") ~= ARGV[1] then
   return -1
 end
-return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+return redis.call("PEXPIREAT", KEYS[1], ARGV[2])
 `)
 )
 
@@ -62,25 +65,25 @@ func sessKey(id string) string {
 	return "sess:" + id
 }
 
-func sessionTTL(idleTTL time.Duration, absoluteExpiry, now time.Time) (time.Duration, error) {
+func sessionDeadline(idleTTL time.Duration, absoluteExpiry, now time.Time) (time.Time, error) {
 	if idleTTL <= 0 {
-		return 0, errors.New("redis: session idle ttl must be positive")
+		return time.Time{}, errors.New("redis: session idle ttl must be positive")
 	}
-	remaining := absoluteExpiry.Sub(now)
-	if remaining <= 0 {
-		return 0, errors.New("redis: session absolute ttl must be positive")
+	if !absoluteExpiry.After(now) {
+		return time.Time{}, errors.New("redis: session absolute ttl must be positive")
 	}
-	if remaining < idleTTL {
-		idleTTL = remaining
+	deadline := now.Add(idleTTL)
+	if absoluteExpiry.Before(deadline) {
+		deadline = absoluteExpiry
 	}
 
-	// Redis expiry is millisecond-granular. Round down so the Redis key can
-	// never outlive the stored absolute expiry.
-	idleTTL = idleTTL.Truncate(time.Millisecond)
-	if idleTTL <= 0 {
-		return 0, errors.New("redis: session ttl is below redis precision")
+	// Redis expiry timestamps are millisecond-granular. Round down so the key
+	// can never outlive either the idle deadline or absolute expiry.
+	deadline = deadline.Truncate(time.Millisecond)
+	if !deadline.After(now) {
+		return time.Time{}, errors.New("redis: session ttl is below redis precision")
 	}
-	return idleTTL, nil
+	return deadline, nil
 }
 
 func encodeSessionTime(value time.Time) string {
@@ -116,7 +119,7 @@ func (s *SessionStore) Create(
 		return auth.Session{}, errors.New("redis: session absolute ttl must be positive")
 	}
 	absoluteExpiry := now.Add(absoluteTTL)
-	ttl, err := sessionTTL(idleTTL, absoluteExpiry, now)
+	deadline, err := sessionDeadline(idleTTL, absoluteExpiry, now)
 	if err != nil {
 		return auth.Session{}, err
 	}
@@ -137,10 +140,17 @@ func (s *SessionStore) Create(
 			encodeSessionTime(now),
 			encodeSessionTime(absoluteExpiry),
 			sess.CSRFToken,
-			ttl.Milliseconds(),
+			deadline.UnixMilli(),
 		).Int64()
 		if err != nil {
 			return auth.Session{}, fmt.Errorf("redis: create session: %w", err)
+		}
+		if created == 0 {
+			continue
+		}
+		if created == -1 || !s.now().UTC().Before(deadline) {
+			_ = s.client.Del(ctx, sessKey(sess.ID)).Err()
+			return auth.Session{}, errors.New("redis: create session: expired during write")
 		}
 		if created == 1 {
 			return sess, nil
@@ -150,11 +160,11 @@ func (s *SessionStore) Create(
 }
 
 func (s *SessionStore) Get(ctx context.Context, id string) (auth.Session, error) {
-	sess, _, err := s.get(ctx, id, s.now().UTC())
+	sess, _, err := s.get(ctx, id)
 	return sess, err
 }
 
-func (s *SessionStore) get(ctx context.Context, id string, now time.Time) (auth.Session, string, error) {
+func (s *SessionStore) get(ctx context.Context, id string) (auth.Session, string, error) {
 	if id == "" {
 		return auth.Session{}, "", auth.ErrSessionNotFound
 	}
@@ -187,6 +197,7 @@ func (s *SessionStore) get(ctx context.Context, id string, now time.Time) (auth.
 		return auth.Session{}, "", errors.New("redis: malformed session: invalid csrf token")
 	}
 
+	now := s.now().UTC()
 	if !now.Before(absoluteExpiry) {
 		_ = s.client.Del(ctx, sessKey(id)).Err()
 		return auth.Session{}, "", auth.ErrSessionNotFound
@@ -204,12 +215,12 @@ func (s *SessionStore) Touch(ctx context.Context, id string, idleTTL time.Durati
 	if idleTTL <= 0 {
 		return errors.New("redis: session idle ttl must be positive")
 	}
-	now := s.now().UTC()
-	sess, absoluteRaw, err := s.get(ctx, id, now)
+	sess, absoluteRaw, err := s.get(ctx, id)
 	if err != nil {
 		return err
 	}
-	ttl, err := sessionTTL(idleTTL, sess.AbsoluteExpiry, now)
+	now := s.now().UTC()
+	deadline, err := sessionDeadline(idleTTL, sess.AbsoluteExpiry, now)
 	if err != nil {
 		if !now.Before(sess.AbsoluteExpiry) {
 			_ = s.client.Del(ctx, sessKey(id)).Err()
@@ -223,12 +234,16 @@ func (s *SessionStore) Touch(ctx context.Context, id string, idleTTL time.Durati
 		s.client,
 		[]string{sessKey(id)},
 		absoluteRaw,
-		ttl.Milliseconds(),
+		deadline.UnixMilli(),
 	).Int64()
 	if err != nil {
 		return fmt.Errorf("redis: touch session: %w", err)
 	}
 	if touched != 1 {
+		return auth.ErrSessionNotFound
+	}
+	if !s.now().UTC().Before(deadline) {
+		_ = s.client.Del(ctx, sessKey(id)).Err()
 		return auth.ErrSessionNotFound
 	}
 	return nil

@@ -4,18 +4,53 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/knumchoke/secure-pastebin/internal/auth"
 )
 
+type commandClockHook struct {
+	command string
+	after   bool
+	once    sync.Once
+	advance func()
+}
+
+func (h *commandClockHook) DialHook(next redis.DialHook) redis.DialHook {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return next(ctx, network, addr)
+	}
+}
+
+func (h *commandClockHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		matches := strings.EqualFold(cmd.Name(), h.command)
+		if matches && !h.after {
+			h.once.Do(h.advance)
+		}
+		err := next(ctx, cmd)
+		if matches && h.after {
+			h.once.Do(h.advance)
+		}
+		return err
+	}
+}
+
+func (h *commandClockHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
 func TestSessionStoreCreateAndGet(t *testing.T) {
 	m, c := newMini(t)
 	now := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	m.SetTime(now)
 	store := NewSessionStore(c, func() time.Time { return now })
 	ctx := context.Background()
 	userID := uuid.New()
@@ -37,8 +72,11 @@ func TestSessionStoreCreateAndGet(t *testing.T) {
 			t.Fatalf("%s is not 32 random base64url bytes: length=%d err=%v", name, len(raw), err)
 		}
 	}
-	if first.UserID != userID || !first.CreatedAt.Equal(now) || !first.AbsoluteExpiry.Equal(now.Add(12*time.Hour)) {
-		t.Fatalf("created session = %+v", first)
+	if first.UserID != userID {
+		t.Fatal("created session has the wrong user")
+	}
+	if !first.CreatedAt.Equal(now) || !first.AbsoluteExpiry.Equal(now.Add(12*time.Hour)) {
+		t.Fatal("created session has incorrect timestamps")
 	}
 	if ttl := m.TTL(sessKey(first.ID)); ttl != 8*time.Hour {
 		t.Fatalf("ttl = %v, want 8h", ttl)
@@ -49,13 +87,14 @@ func TestSessionStoreCreateAndGet(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got != first {
-		t.Fatalf("round trip mismatch:\n got: %+v\nwant: %+v", got, first)
+		t.Fatal("session fields changed during round trip")
 	}
 }
 
 func TestSessionStoreTouchCapsTTLAtAbsoluteExpiry(t *testing.T) {
 	m, c := newMini(t)
 	now := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	m.SetTime(now)
 	store := NewSessionStore(c, func() time.Time { return now })
 	ctx := context.Background()
 	sess, err := store.Create(ctx, uuid.New(), 8*time.Hour, 12*time.Hour)
@@ -64,6 +103,7 @@ func TestSessionStoreTouchCapsTTLAtAbsoluteExpiry(t *testing.T) {
 	}
 
 	now = now.Add(11 * time.Hour)
+	m.SetTime(now)
 	if err := store.Touch(ctx, sess.ID, 8*time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +115,7 @@ func TestSessionStoreTouchCapsTTLAtAbsoluteExpiry(t *testing.T) {
 func TestSessionStoreTouchAcceptsUnixSecondRecords(t *testing.T) {
 	m, c := newMini(t)
 	now := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	m.SetTime(now)
 	const id = "legacy"
 	if err := c.HSet(context.Background(), sessKey(id), map[string]any{
 		"user_id":    uuid.NewString(),
@@ -102,6 +143,7 @@ func TestSessionStoreAbsoluteExpiryIsEnforcedOnRead(t *testing.T) {
 		t.Run(offset.String(), func(t *testing.T) {
 			m, c := newMini(t)
 			now := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+			m.SetTime(now)
 			store := NewSessionStore(c, func() time.Time { return now })
 			sess, err := store.Create(context.Background(), uuid.New(), time.Hour, time.Hour)
 			if err != nil {
@@ -109,6 +151,7 @@ func TestSessionStoreAbsoluteExpiryIsEnforcedOnRead(t *testing.T) {
 			}
 
 			now = sess.AbsoluteExpiry.Add(offset)
+			m.SetTime(now)
 			if _, err := store.Get(context.Background(), sess.ID); !errors.Is(err, auth.ErrSessionNotFound) {
 				t.Fatalf("get at %v relative to expiry: %v", offset, err)
 			}
@@ -221,7 +264,7 @@ func TestSessionStoreRejectsInvalidTTLsWithoutWriting(t *testing.T) {
 				t.Fatal("Create accepted invalid TTL")
 			}
 			if len(m.Keys()) != 0 {
-				t.Fatalf("invalid Create wrote keys: %v", m.Keys())
+				t.Fatalf("invalid Create wrote %d keys", len(m.Keys()))
 			}
 		})
 	}
@@ -230,6 +273,7 @@ func TestSessionStoreRejectsInvalidTTLsWithoutWriting(t *testing.T) {
 func TestSessionStoreSubsecondTTLExpiresAndDoesNotExceedAbsolute(t *testing.T) {
 	m, c := newMini(t)
 	now := time.Unix(100, 0).UTC()
+	m.SetTime(now)
 	store := NewSessionStore(c, func() time.Time { return now })
 	sess, err := store.Create(context.Background(), uuid.New(), 2500*time.Microsecond, 1500*time.Microsecond)
 	if err != nil {
@@ -247,6 +291,7 @@ func TestSessionStoreSubsecondTTLExpiresAndDoesNotExceedAbsolute(t *testing.T) {
 func TestSessionStoreTouchNeverResurrects(t *testing.T) {
 	m, c := newMini(t)
 	now := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	m.SetTime(now)
 	store := NewSessionStore(c, func() time.Time { return now })
 	ctx := context.Background()
 
@@ -269,11 +314,92 @@ func TestSessionStoreTouchNeverResurrects(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = expired.AbsoluteExpiry
+	m.SetTime(now)
 	if err := store.Touch(ctx, expired.ID, time.Hour); !errors.Is(err, auth.ErrSessionNotFound) {
 		t.Fatalf("touch absolutely expired: %v", err)
 	}
 	if m.Exists(sessKey(expired.ID)) {
 		t.Fatal("touch retained an absolutely expired session")
+	}
+}
+
+func TestSessionStoreGetChecksExpiryAfterRedisRead(t *testing.T) {
+	m, c := newMini(t)
+	now := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	m.SetTime(now)
+	store := NewSessionStore(c, func() time.Time { return now })
+	sess, err := store.Create(context.Background(), uuid.New(), time.Hour, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.AddHook(&commandClockHook{
+		command: "hgetall",
+		after:   true,
+		advance: func() {
+			now = sess.AbsoluteExpiry
+			m.SetTime(now)
+		},
+	})
+
+	if _, err := store.Get(context.Background(), sess.ID); !errors.Is(err, auth.ErrSessionNotFound) {
+		t.Fatalf("get crossing absolute expiry: %v", err)
+	}
+	if m.Exists(sessKey(sess.ID)) {
+		t.Fatal("get retained a session that expired during the Redis read")
+	}
+}
+
+func TestSessionStoreTouchDeadlineDoesNotDriftDuringRedisWrite(t *testing.T) {
+	m, c := newMini(t)
+	createdAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	now := createdAt
+	m.SetTime(now)
+	store := NewSessionStore(c, func() time.Time { return now })
+	sess, err := store.Create(context.Background(), uuid.New(), time.Hour, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Load the touch script before installing the timing hook so the next
+	// touch is one EVALSHA command.
+	if err := store.Touch(context.Background(), sess.ID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	now = sess.AbsoluteExpiry.Add(-10 * time.Minute)
+	m.SetTime(now)
+	c.AddHook(&commandClockHook{
+		command: "evalsha",
+		advance: func() {
+			now = now.Add(5 * time.Minute)
+			m.SetTime(now)
+		},
+	})
+
+	if err := store.Touch(context.Background(), sess.ID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if ttl := m.TTL(sessKey(sess.ID)); ttl <= 0 || ttl > 5*time.Minute {
+		t.Fatalf("ttl after delayed touch = %v, want at most 5m", ttl)
+	}
+}
+
+func TestSessionStoreCreateDoesNotReturnSessionExpiredDuringWrite(t *testing.T) {
+	m, c := newMini(t)
+	now := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	m.SetTime(now)
+	c.AddHook(&commandClockHook{
+		command: "evalsha",
+		advance: func() {
+			now = now.Add(20 * time.Minute)
+			m.SetTime(now)
+		},
+	})
+	store := NewSessionStore(c, func() time.Time { return now })
+
+	if _, err := store.Create(context.Background(), uuid.New(), 10*time.Minute, time.Hour); err == nil {
+		t.Fatal("Create returned a session whose idle deadline passed during the write")
+	}
+	if len(m.Keys()) != 0 {
+		t.Fatalf("expired Create retained %d Redis keys", len(m.Keys()))
 	}
 }
 
