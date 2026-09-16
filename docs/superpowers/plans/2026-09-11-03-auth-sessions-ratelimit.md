@@ -895,7 +895,7 @@ rtk git commit -m "feat(ws3): local authenticator with uniform failures"
   - `auth.OIDCState struct{ Verifier, Nonce string; CreatedAt time.Time }` and `auth.OIDCStateStore interface{ Save(...); Take(...) }` — add both to `internal/auth/oidc.go` (they are new, additive; record in CHANGELOG).
   - `auth.NewOIDC(ctx, cfg config.OIDCConfig, users UserStore, states OIDCStateStore, sink audit.Sink, httpClient *http.Client) (*OIDC, error)` implementing `auth.OIDCFlow`.
 
-- [ ] **Step 1: Write the state-store test**
+- [x] **Step 1: Write the state-store test**
 
 `internal/store/redis/oidcstate_test.go`:
 ```go
@@ -931,7 +931,7 @@ func TestOIDCStateStore_SingleUse(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Implement the state store**
+- [x] **Step 2: Implement the state store**
 
 `internal/store/redis/oidcstate.go`:
 ```go
@@ -988,7 +988,7 @@ func (s *OIDCStateStore) Take(ctx context.Context, state string) (auth.OIDCState
 }
 ```
 
-- [ ] **Step 3: Write the failing OIDC flow test with a fake IdP**
+- [x] **Step 3: Write the failing OIDC flow test with a fake IdP**
 
 `internal/auth/oidc_test.go`:
 ```go
@@ -1178,12 +1178,12 @@ func TestOIDC_NonceMismatch(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Run to verify it fails**
+- [x] **Step 4: Run to verify it fails**
 
 Run: `rtk go get github.com/coreos/go-oidc/v3@latest golang.org/x/oauth2@latest github.com/go-jose/go-jose/v4@latest && rtk go test ./internal/auth/ -run OIDC -v`
 Expected: FAIL — `undefined: NewOIDC` (`go-jose` is already an indirect dependency of go-oidc; it is used only in tests)
 
-- [ ] **Step 5: Implement**
+- [x] **Step 5: Implement**
 
 `internal/auth/oidc.go`:
 ```go
@@ -1372,7 +1372,7 @@ func stringSlice(v any) []string {
 }
 ```
 
-- [ ] **Step 6: Run, commit**
+- [x] **Step 6: Run, commit**
 
 Run: `rtk go test ./internal/auth/ ./internal/store/redis/ -race -v` — Expected: PASS
 

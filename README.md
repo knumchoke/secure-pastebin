@@ -43,4 +43,8 @@ Run domain checks with `rtk go test -race ./internal/crypto ./internal/paste ./i
 
 Authentication foundations provide cryptographically random tokens and Argon2id password hashing through the shared KDF concurrency gate. Gate saturation returns the domain KDF-busy error. The Postgres user store supports local accounts and OIDC identities keyed by issuer and subject; OIDC profile updates preserve account identity and locally disabled status while refreshing display name, admin membership, and last-login time.
 
-WS3 implementation is in progress; see its plan for completed tasks. Run user-store integration checks with `rtk proxy env GOTOOLCHAIN=go1.26.0 PASTEBIN_INTEGRATION=1 go test -race ./internal/store/postgres -run Integration_UserStore`.
+Local authentication performs a dummy password verification for unknown or non-local accounts and returns uniform credential failures. Redis sessions use fresh random IDs and CSRF tokens, idle expiry capped by absolute expiry, and absolute Redis deadlines with checks after blocking I/O.
+
+OIDC uses authorization code with S256 PKCE and single-use Redis state lasting five minutes. The required group is checked before provisioning; admin membership is refreshed on login and locally disabled users remain denied. Provider errors are sanitized before returning them to the HTTP layer.
+
+WS3 rate limits and the user CLI are still in progress; see its plan for completed tasks. Run user-store integration checks with `rtk proxy env GOTOOLCHAIN=go1.26.0 PASTEBIN_INTEGRATION=1 go test -race ./internal/store/postgres -run Integration_UserStore`.
