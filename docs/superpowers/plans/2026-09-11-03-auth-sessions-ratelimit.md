@@ -1394,7 +1394,7 @@ Append to `docs/api/CHANGELOG.md` under a new `## 1.0.1 — <date>` heading: "Ad
 **Interfaces:**
 - Produces: `ratelimit.RulesFromConfig(c config.RateConfig) map[Scope]Rule`; `ratelimit.NewRedisLimiter(c *redis.Client, rules map[Scope]Rule, log *slog.Logger) *RedisLimiter` implementing `Limiter`. Unknown scope → allowed (logged once).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `internal/ratelimit/redis_test.go`:
 ```go
@@ -1469,12 +1469,12 @@ func TestRulesFromConfig(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `rtk go test ./internal/ratelimit/ -v`
 Expected: FAIL — `undefined: NewRedisLimiter`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `internal/ratelimit/redis.go`:
 ```go
@@ -1559,7 +1559,7 @@ func (l *RedisLimiter) Allow(ctx context.Context, scope Scope, key string) Decis
 }
 ```
 
-- [ ] **Step 4: Run, commit**
+- [x] **Step 4: Run, commit**
 
 Run: `rtk go test ./internal/ratelimit/ -race -v` — Expected: PASS
 
@@ -1937,6 +1937,8 @@ rtk git commit -m "feat(ws3): pastebin user CLI (create/set-password/disable/ena
 - Task 3 stores precise timestamps while accepting Unix-second records. Redis create and touch use atomic Lua with absolute millisecond deadlines, and time is rechecked after blocking I/O. This prevents delayed commands from extending sessions past their absolute expiry. Regression tests advance the clock during Redis reads and writes.
 
 - Task 4 propagates KDF busy, cancellation, and other verifier errors on dummy verification paths as well as known-user paths, avoiding different responses based on account existence under gate saturation.
+
+- Task 6 follows the specified fixed-window algorithm. Unknown scopes and nonpositive configured limits allow with a warning; invalid enabled windows and Redis failures deny. Integration follow-up: the frozen Limiter Decision has no backend-unavailable signal, so WS5 currently emits 429 for Redis failures instead of the specification’s 503. The integrator must coordinate an additive contract change and HTTP mapping; WS3 keeps the frozen interface unchanged.
 
 ## Done when
 
